@@ -1,5 +1,6 @@
 [app]
 title = My Store
+android.sdk=33
 package.name = mystore
 package.domain = org.mystore
 source.dir = .

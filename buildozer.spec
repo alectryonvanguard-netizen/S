@@ -1,19 +1,24 @@
+
 [app]
 title = My Store
-android.sdk=33
 package.name = mystore
 package.domain = org.mystore
 source.dir = .
-source.include_exts = py,png,jpg,json
+source.include_exts = py,png,jpg,jpeg,json
 version = 1.0
+
 requirements = python3,kivy,pyjnius,android
-android.ndk=27.3.13750724
+
 orientation = portrait
 fullscreen = 0
-android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,REQUEST_INSTALL_PACKAGES
+
+android.api = 33
 android.minapi = 24
+android.ndk = 25b
 android.archs = arm64-v8a
 android.accept_sdk_license = True
+
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,REQUEST_INSTALL_PACKAGES
 
 [buildozer]
 log_level = 2

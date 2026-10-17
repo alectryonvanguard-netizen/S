@@ -265,6 +265,11 @@ def avatar(name, size, bg=WHITE, fg=ACCENT):
     return holder
 
 
+def is_store_link(a):
+    """True for listings that just point to the official Google Play page."""
+    return "play.google.com" in (a.get("url") or "")
+
+
 # ---------------------------------------------------------------- loading screen
 def asset(name):
     return os.path.join(HERE, name)
@@ -561,16 +566,72 @@ class StoreApp(App):
             cancel.bind(on_release=lambda *a: self.show_main())
             col.add_widget(cancel)
 
-        diag = pill("Test connection", CHIP_BG, GRAY, h=34, size="12sp", bold=False)
-        diag.bind(on_release=lambda *a: self.diagnose())
-        col.add_widget(diag)
-
         sv.add_widget(col)
         self.show(sv)
 
     def do_register(self, name, email, pw):
-        run_bg(lambda: call("/api/register", {"name": name, "email": email, "password": pw}),
-               lambda res, e: self.after_auth(res, e, "signup", email))
+        self.notice("Sending your code...")
+        run_bg(lambda: call("/api/register/start", {"name": name, "email": email, "password": pw}),
+               lambda res, e: self.after_start(res, e, name, email))
+
+    def after_start(self, res, err, name, email):
+        if err:
+            self.show_auth("signup", message=err, prefill=email)
+            return
+        self.show_verify(name, email)
+
+    def show_verify(self, name, email, message="", info=""):
+        sv = ScrollView()
+        col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(12),
+                        padding=[dp(22), dp(40), dp(22), dp(24)])
+        col.bind(minimum_height=col.setter("height"))
+        col.add_widget(text("[b]Check your email[/b]", size="24sp", height=dp(44), halign="center"))
+        col.add_widget(auto_text("We sent a 6-digit code to [b]%s[/b]. Type it below to finish "
+                                 "creating your account. It can take a minute, so check Spam too."
+                                 % esc(email), size="13sp", color=GRAY))
+        box, code_in = field("6-digit code")
+        code_in.input_filter = "int"
+        col.add_widget(box)
+        err = text(esc(message or info), size="13sp", color=RED if message else GRAY, height=dp(36))
+        col.add_widget(err)
+
+        go = pill("Verify and create account", ACCENT, WHITE, h=52, size="16sp")
+
+        def submit(*a):
+            code = code_in.text.strip()
+            if len(code) != 6 or not code.isdigit():
+                err.color = RED
+                err.text = "Enter the 6-digit code"
+                return
+            err.color = GRAY
+            err.text = "Checking..."
+            run_bg(lambda: call("/api/register/confirm", {"email": email, "code": code}),
+                   lambda res, e: self.after_confirm(res, e, name, email))
+        go.bind(on_release=submit)
+        col.add_widget(go)
+
+        again = pill("Send a new code", CHIP_BG, DARK, h=44, bold=False)
+
+        def resend(*a):
+            err.color = GRAY
+            err.text = "Sending..."
+            run_bg(lambda: call("/api/register/resend", {"email": email}),
+                   lambda res, e: self.show_verify(name, email, message=e) if e
+                   else self.show_verify(name, email, info="A new code was sent."))
+        again.bind(on_release=resend)
+        col.add_widget(again)
+
+        back = pill("Back", CHIP_BG, DARK, h=44, bold=False)
+        back.bind(on_release=lambda *a: self.show_auth("signup", prefill=email))
+        col.add_widget(back)
+        sv.add_widget(col)
+        self.show(sv)
+
+    def after_confirm(self, res, err, name, email):
+        if err:
+            self.show_verify(name, email, message=err)
+            return
+        self.after_auth(res, None, "signup", email)
 
     def is_guest(self):
         return self.active() is None
@@ -854,14 +915,17 @@ class StoreApp(App):
     def card(self, a):
         name = a["name"]
         color = ICON_COLORS[sum(ord(c) for c in name) % len(ICON_COLORS)]
-        if a.get("verified"):
-            badge = "[color=0f9d58]Verified[/color]"
+        if is_store_link(a):
+            badge = "[color=4285f4]Opens in Google Play[/color]"
         else:
-            badge = "[color=f59e0b]Unverified %d/%d[/color]" % (a["verify_votes"], a["threshold"])
-        if a["kind"] == "mod":
-            badge += "   [color=e53935][b]MOD[/b][/color]"
-        elif a["kind"] == "external":
-            badge += "   [color=4285f4]via %s[/color]" % esc(a["source"])
+            if a.get("verified"):
+                badge = "[color=0f9d58]Verified[/color]"
+            else:
+                badge = "[color=f59e0b]Unverified %d/%d[/color]" % (a["verify_votes"], a["threshold"])
+            if a["kind"] == "mod":
+                badge += "   [color=e53935][b]MOD[/b][/color]"
+            elif a["kind"] == "external":
+                badge += "   [color=4285f4]via %s[/color]" % esc(a["source"])
 
         card = BoxLayout(size_hint_y=None, height=dp(124), padding=dp(12), spacing=dp(12))
         paint(card, WHITE, 18)
@@ -878,7 +942,7 @@ class StoreApp(App):
 
         side = AnchorLayout(size_hint_x=None, width=dp(88))
         col = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(78), spacing=dp(6))
-        inst = pill("Install", ACCENT, WHITE)
+        inst = pill("Open" if is_store_link(a) else "Install", ACCENT, WHITE)
         inst.bind(on_release=lambda *x, i=a["id"]: self.get_app(i))
         det = pill("Details", CHIP_BG, DARK, h=34, size="12sp", bold=False)
         det.bind(on_release=lambda *x, i=a["id"]: self.details(i))
@@ -940,6 +1004,11 @@ class StoreApp(App):
     # ============================================================ details / install
     def details(self, app_id):
         a = self.items[app_id]
+        if is_store_link(a):
+            self.popup("App details", "[b]%s[/b]\nby %s\n%s\n\nThis opens the official Google Play page."
+                       % (esc(a["name"]), esc(a["developer"]), esc(a["category"])),
+                       extra=("Report", lambda: self.report(app_id)))
+            return
         notes = ""
         if a["kind"] == "mod":
             notes = "\n[color=ff6655]Unofficial mod of %s. Use at your own risk.[/color]" % esc(a["mod_of"])
@@ -955,6 +1024,9 @@ class StoreApp(App):
             self.need_login("install apps")
             return
         a = self.items[app_id]
+        if is_store_link(a):
+            self.open_store_page(a)
+            return
         warn = ""
         if not a.get("verified") and P["warn_unverified"]:
             warn += "This app is NOT verified yet.\n"
@@ -976,6 +1048,25 @@ class StoreApp(App):
         run_bg(lambda: fetch_file(url, path, tok),
                lambda digest, err: self.downloaded(a, path, digest, err))
 
+    def open_store_page(self, a):
+        tok = self.token()
+        run_bg(lambda: call("/api/track/%s" % a["id"], {"event": "download"}, tok),
+               lambda r, e: None)
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            Activity = autoclass("org.kivy.android.PythonActivity")
+            i = Intent(Intent.ACTION_VIEW, Uri.parse(a["url"]))
+            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            Activity.mActivity.startActivity(i)
+        except Exception:
+            try:
+                import webbrowser
+                webbrowser.open(a["url"])
+            except Exception:
+                self.say("Open this link in your browser: " + a["url"])
+
     def downloaded(self, a, path, digest, err):
         if err:
             self.say("Download failed: " + err)
@@ -985,6 +1076,10 @@ class StoreApp(App):
             self.say("Checksum mismatch - file deleted")
             self.popup("Blocked", "The file does not match the published checksum and was deleted.")
             return
+        if a["source"] != "own":          # downloads from other sites are counted by telling the server
+            tok = self.token()
+            run_bg(lambda: call("/api/track/%s" % a["id"], {"event": "download"}, tok),
+                   lambda r, e: None)
         P["downloads"] = (P["downloads"] + [path])[-50:]
         save_prefs()
         self.say("Saved: " + path)
@@ -1116,7 +1211,6 @@ class StoreApp(App):
 
         g = self.group(col, "SERVER")
         self.row(g, "Store server", SERVER.replace("https://", ""))
-        self.row(g, "Test connection", "", self.test_connection)
 
         if not guest and (P.get("dev_unlocked") or not HIDE_PUBLISH_REQUEST):
             g = self.group(col, "PUBLISH AN APP")
@@ -1288,16 +1382,6 @@ class StoreApp(App):
         self.show_main()
         self.switch_tab("settings")
 
-    def diagnose(self):
-        def done(r, e):
-            info = "Server: %s\nCertificates: %s" % (esc(SERVER), esc(CERT_SOURCE))
-            if e:
-                self.popup("Connection failed", info + "\n\n" + esc(e))
-            else:
-                self.popup("Connected", info + "\n\nThe server answered.")
-        self.notice("Testing...")
-        run_bg(lambda: call("/api/ping"), done)
-
     def publish_form(self):
         acct = self.active() or {"email": ""}
         sv = ScrollView(bar_width=dp(3))
@@ -1409,11 +1493,6 @@ class StoreApp(App):
                 lines.append(line)
             self.popup("My requests", "\n\n".join(lines))
         run_bg(lambda: call("/api/submissions/mine", token=tok), done)
-
-    def test_connection(self):
-        self.notice("Testing...")
-        run_bg(lambda: call("/api/ping"),
-               lambda r, e: self.notice("Connected" if not e else "Failed: " + e))
 
 
 StoreApp().run()

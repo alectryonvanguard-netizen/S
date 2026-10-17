@@ -1,7 +1,7 @@
-# store_app_accounts.py - My Store with accounts, terms/policy screen and Settings.
-# Same engine/widgets as the working store_app_modern.py.
-# You can change the server address inside the app (Sign-in screen > Change, or Settings).
+# main.py - My Store with accounts, terms/policy screen and Settings.
+# The server address is fixed (SERVER below); users cannot change it.
 import os
+import ssl
 import json
 import uuid
 import hashlib
@@ -23,7 +23,14 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.utils import escape_markup as esc
 
-DEFAULT_SERVER = "http://YOUR-SERVER-IP:5000"
+# Android has no built-in list of trusted certificates, so use certifi's.
+try:
+    import certifi
+    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    SSL_CTX = ssl.create_default_context()
+
+SERVER = "https://sam202411.pythonanywhere.com"
 APP_VERSION = "1.0"
 TERMS_VERSION = "2026-10"
 SESSION_EXPIRED = "Session expired"
@@ -72,7 +79,7 @@ PREFS_PATH = os.path.join(HERE, "store_prefs.json")
 
 # ---------------------------------------------------------------- saved settings
 def default_prefs():
-    return {"server": DEFAULT_SERVER, "accounts": [], "active": "", "accepted": {},
+    return {"server": SERVER, "accounts": [], "active": "", "accepted": {},
             "warn_unverified": True, "ask_verify": True, "show_mods": True,
             "show_external": True, "sort": "popular", "downloads": []}
 
@@ -84,6 +91,7 @@ def load_prefs():
             p.update(json.load(f))
     except Exception:
         pass
+    p["server"] = SERVER      # always use the fixed server, even if an old one was saved
     return p
 
 
@@ -108,7 +116,8 @@ def call(path, payload=None, token=None):
     if token:
         headers["Authorization"] = "Bearer " + token
     try:
-        with urlopen(Request(P["server"] + path, data=data, headers=headers), timeout=20) as r:
+        with urlopen(Request(SERVER + path, data=data, headers=headers),
+                     timeout=20, context=SSL_CTX) as r:
             return json.loads(r.read().decode())
     except HTTPError as e:
         msg = None
@@ -122,7 +131,8 @@ def call(path, payload=None, token=None):
 def fetch_file(url, path, token=None):
     headers = {"Authorization": "Bearer " + token} if token else {}
     h = hashlib.sha256()
-    with urlopen(Request(url, headers=headers), timeout=60) as r, open(path, "wb") as f:
+    with urlopen(Request(url, headers=headers), timeout=60, context=SSL_CTX) as r, \
+            open(path, "wb") as f:
         while True:
             chunk = r.read(1 << 16)
             if not chunk:
@@ -164,13 +174,6 @@ def save_dir():
         return d
     except Exception:
         return HERE
-
-
-def normalize_server(v):
-    v = v.strip().rstrip("/")
-    if v and not v.startswith("http"):
-        v = "http://" + v
-    return v
 
 
 # ---------------------------------------------------------------- ui helpers
@@ -342,9 +345,6 @@ class StoreApp(App):
             if "@" not in email or "." not in email.split("@")[-1]:
                 err.text = "Enter a valid email address"
                 return
-            if "YOUR-SERVER-IP" in P["server"]:
-                err.text = "Set your server address first (Change, below)"
-                return
             if signup:
                 nm = name_in.text.strip()
                 if not nm:
@@ -375,17 +375,6 @@ class StoreApp(App):
             cancel = pill("Cancel", CHIP_BG, DARK, h=44, bold=False)
             cancel.bind(on_release=lambda *a: self.show_main())
             col.add_widget(cancel)
-
-        srv = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
-        shown = P["server"].replace("https://", "").replace("http://", "")
-        srv.add_widget(text("Server: %s" % esc(shown), size="12sp", color=GRAY, shorten=True))
-        ch = pill("Change", CHIP_BG, DARK, h=30, size="12sp", bold=False)
-        ch.size_hint_x = None
-        ch.width = dp(80)
-        ch.bind(on_release=lambda *a: self.server_popup(
-            lambda: self.show_auth(mode, prefill=email_in.text, can_cancel=can_cancel)))
-        srv.add_widget(ch)
-        col.add_widget(srv)
 
         sv.add_widget(col)
         self.show(sv)
@@ -618,9 +607,6 @@ class StoreApp(App):
             pass
 
     def load(self):
-        if "YOUR-SERVER-IP" in P["server"]:
-            self.say("Set your server address in Settings")
-            return
         self.say("Loading...")
         path = "/api/apps?q=%s&kind=%s" % (quote(self.search.text.strip()), self.kind)
         tok = self.token()
@@ -773,7 +759,7 @@ class StoreApp(App):
         safe = "".join(c if c.isalnum() else "_" for c in a["name"])
         path = os.path.join(save_dir(), "%s_%s.apk" % (safe, a["id"]))
         own = a["source"] == "own"
-        url = ("%s/api/download/%s" % (P["server"], a["id"])) if own else a["url"]
+        url = ("%s/api/download/%s" % (SERVER, a["id"])) if own else a["url"]
         tok = self.token() if own else None      # never send your token to other sites
         self.say("Downloading %s ..." % a["name"])
         run_bg(lambda: fetch_file(url, path, tok),
@@ -907,8 +893,7 @@ class StoreApp(App):
         self.row(g, "Clear downloaded APKs", "%d files" % len(P["downloads"]), self.clear_downloads)
 
         g = self.group(col, "SERVER")
-        self.row(g, "Server address", P["server"], lambda: self.server_popup(
-            lambda: self.switch_tab("settings")))
+        self.row(g, "Store server", SERVER.replace("https://", ""))
         self.row(g, "Test connection", "", self.test_connection)
 
         g = self.group(col, "ABOUT & LEGAL")
@@ -1052,20 +1037,6 @@ class StoreApp(App):
         save_prefs()
         self.notice("Removed %d files" % n)
         self.switch_tab("settings")
-
-    def server_popup(self, after):
-        def submit(vals, msg, pop):
-            v = normalize_server(vals[0])
-            if not v:
-                msg.text = "Enter the server address"
-                return
-            P["server"] = v
-            save_prefs()
-            pop.dismiss()
-            self.notice("Server saved")
-            after()
-        self.form_popup("Server address", "Example: http://192.168.1.5:5000",
-                        [("http://host:5000", False, P["server"])], "Save", submit)
 
     def test_connection(self):
         self.notice("Testing...")

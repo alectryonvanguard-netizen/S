@@ -2,6 +2,8 @@
 # The server address is fixed (SERVER below); users cannot change it.
 import os
 import ssl
+import math
+import time
 import json
 import uuid
 import hashlib
@@ -13,9 +15,13 @@ from urllib.error import HTTPError
 
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.image import Image
+from kivy.uix.widget import Widget
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
@@ -26,14 +32,19 @@ from kivy.utils import escape_markup as esc
 # Android has no built-in list of trusted certificates, so use certifi's.
 try:
     import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
     SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+    CERT_SOURCE = "certifi"
 except Exception:
     SSL_CTX = ssl.create_default_context()
+    CERT_SOURCE = "built-in (certifi missing)"
 
 SERVER = "https://sam202411.pythonanywhere.com"
 APP_VERSION = "1.0"
 TERMS_VERSION = "2026-10"
 SESSION_EXPIRED = "Session expired"
+SPLASH_SECONDS = 5     # how long the loading screen stays
+HIDE_PUBLISH_REQUEST = True   # True: "Publish an app" stays hidden until Version is tapped 7 times
 
 # ---------------------------------------------------------------- colors
 HEADER = (0.00, 0.55, 0.42, 1)
@@ -81,7 +92,8 @@ PREFS_PATH = os.path.join(HERE, "store_prefs.json")
 def default_prefs():
     return {"server": SERVER, "accounts": [], "active": "", "accepted": {},
             "warn_unverified": True, "ask_verify": True, "show_mods": True,
-            "show_external": True, "sort": "popular", "downloads": []}
+            "show_external": True, "sort": "popular", "downloads": [],
+            "dev_unlocked": False, "guest": False}
 
 
 def load_prefs():
@@ -232,6 +244,17 @@ def field(hint, password=False, default=""):
     return box, ti
 
 
+def area(hint, h=110):
+    box = BoxLayout(size_hint_y=None, height=dp(h))
+    paint(box, WHITE, 14)
+    ti = TextInput(hint_text=hint, multiline=True, background_normal="", background_active="",
+                   background_color=(0, 0, 0, 0), foreground_color=DARK,
+                   hint_text_color=(0.55, 0.57, 0.62, 1), cursor_color=ACCENT,
+                   padding=[dp(16), dp(14), dp(16), dp(10)])
+    box.add_widget(ti)
+    return box, ti
+
+
 def avatar(name, size, bg=WHITE, fg=ACCENT):
     holder = AnchorLayout(size_hint=(None, None), size=(dp(size), dp(size)))
     tile = BoxLayout(size_hint=(None, None), size=(dp(size), dp(size)))
@@ -240,6 +263,93 @@ def avatar(name, size, bg=WHITE, fg=ACCENT):
                          size="%dsp" % int(size * 0.45), color=fg, halign="center"))
     holder.add_widget(tile)
     return holder
+
+
+# ---------------------------------------------------------------- loading screen
+def asset(name):
+    return os.path.join(HERE, name)
+
+
+def make_image(name, fill=False):
+    """Image from the app folder, or None if the file is missing (never crashes)."""
+    path = asset(name)
+    if not os.path.exists(path):
+        return None
+    try:
+        return Image(source=path, fit_mode="fill" if fill else "contain")
+    except Exception:
+        try:
+            return Image(source=path, allow_stretch=True, keep_ratio=not fill)
+        except Exception:
+            return None
+
+
+def gradient_texture(c1, c2, w=64):
+    from kivy.graphics.texture import Texture
+    tex = Texture.create(size=(w, 1), colorfmt="rgba")
+    buf = bytearray()
+    for i in range(w):
+        t = i / (w - 1)
+        buf.extend(int(c1[k] + (c2[k] - c1[k]) * t) for k in range(3))
+        buf.append(255)
+    tex.blit_buffer(bytes(buf), colorfmt="rgba", bufferfmt="ubyte")
+    return tex
+
+
+class SplashBar(Widget):
+    """Rounded progress bar with a cyan-to-purple fill."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.progress = 0.0
+        try:
+            self.tex = gradient_texture((34, 211, 238), (192, 90, 245))
+        except Exception:
+            self.tex = None
+        self.bind(pos=self.redraw, size=self.redraw)
+
+    def redraw(self, *a):
+        from kivy.graphics import Color, RoundedRectangle
+        self.canvas.clear()
+        r = self.height / 2
+        with self.canvas:
+            Color(1, 1, 1, 0.12)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[r])
+            if self.progress > 0:
+                w = max(self.height, self.width * self.progress)
+                if self.tex is not None:
+                    Color(1, 1, 1, 1)
+                    RoundedRectangle(pos=self.pos, size=(w, self.height), radius=[r],
+                                     texture=self.tex)
+                else:
+                    Color(0.13, 0.83, 0.93, 1)
+                    RoundedRectangle(pos=self.pos, size=(w, self.height), radius=[r])
+
+
+class SplashSpinner(Widget):
+    """Ring of eight dots with a moving bright head."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.phase = 0
+        self.bind(pos=self.redraw, size=self.redraw)
+
+    def redraw(self, *a):
+        from kivy.graphics import Color, Ellipse
+        self.canvas.clear()
+        n = 8
+        rad = min(self.width, self.height) / 2 * 0.8
+        dot = rad * 0.3
+        with self.canvas:
+            for i in range(n):
+                ang = -2 * math.pi * i / n + math.pi / 2
+                lead = (self.phase - i) % n
+                t = i / (n - 1)
+                Color(0.13 + 0.62 * t, 0.83 - 0.48 * t, 0.93 + 0.03 * t,
+                      max(0.15, 1 - lead / n))
+                Ellipse(pos=(self.center_x + rad * math.cos(ang) - dot / 2,
+                             self.center_y + rad * math.sin(ang) - dot / 2),
+                        size=(dot, dot))
 
 
 # ---------------------------------------------------------------- app
@@ -254,17 +364,86 @@ class StoreApp(App):
         self.root_box = BoxLayout(orientation="vertical")
         paint(self.root_box, PAGE, 0)
         try:
+            self.show_splash(self.start)      # animated loading screen, then start()
+        except Exception:
+            self.start()                      # if the splash ever fails, just start the app
+        return self.root_box
+
+    def start(self, *a):
+        try:
             acct = self.active()
             if acct and P["accepted"].get(acct["email"]) == TERMS_VERSION:
                 self.show_main()
             elif acct:
                 self.show_terms(acct["email"], self.show_main, back=lambda: self.show_auth())
+            elif P.get("guest") and P["accepted"].get("guest") == TERMS_VERSION:
+                self.show_main()
             else:
                 self.show_auth()
         except Exception:
             self.root_box.clear_widgets()
             self.root_box.add_widget(Label(text=traceback.format_exc(), font_size=dp(11)))
-        return self.root_box
+
+    def show_splash(self, done):
+        from kivy.graphics import Color, Rectangle
+        root = FloatLayout()
+        with root.canvas.before:
+            Color(0.02, 0.03, 0.09, 1)
+            rect = Rectangle(pos=root.pos, size=root.size)
+        root.bind(pos=lambda i, v: setattr(rect, "pos", v),
+                  size=lambda i, v: setattr(rect, "size", v))
+
+        bg = make_image("splash_bg.png", fill=True)
+        if bg:
+            root.add_widget(bg)
+
+        W = Window.width
+        logo = make_image("logo.png")
+        if logo:
+            logo.size_hint = (None, None)
+            logo.size = (W * 0.667, W * 0.667)
+            logo.pos_hint = {"center_x": 0.5, "center_y": 0.60}
+            root.add_widget(logo)
+
+        title = make_image("title.png")
+        if title:
+            title.size_hint = (None, None)
+            title.size = (W * 0.76, W * 0.76 * 240 / 1100)
+            title.pos_hint = {"center_x": 0.5, "center_y": 0.445}
+            root.add_widget(title)
+        else:
+            lbl = Label(text="[b]My [color=7c9cff]Store[/color][/b]", markup=True,
+                        font_size="38sp", size_hint=(1, None), height=dp(60),
+                        pos_hint={"center_x": 0.5, "center_y": 0.445})
+            root.add_widget(lbl)
+
+        root.add_widget(Label(text="Shop  \u00b7  Download  \u00b7  Enjoy", font_size="15sp",
+                              color=(0.75, 0.78, 0.88, 1), size_hint=(1, None), height=dp(30),
+                              pos_hint={"center_x": 0.5, "center_y": 0.40}))
+
+        bar = SplashBar(size_hint=(0.6, None), height=dp(8),
+                        pos_hint={"center_x": 0.5, "center_y": 0.35})
+        spin = SplashSpinner(size_hint=(None, None), size=(dp(36), dp(36)),
+                             pos_hint={"center_x": 0.5, "center_y": 0.29})
+        root.add_widget(bar)
+        root.add_widget(spin)
+        self.show(root)
+
+        state = {"t": 0.0, "done": False}
+
+        def tick(dt):
+            if state["done"]:
+                return False
+            state["t"] += dt
+            bar.progress = min(1.0, state["t"] / SPLASH_SECONDS)
+            bar.redraw()
+            spin.phase = int(state["t"] * 10) % 8
+            spin.redraw()
+            if state["t"] >= SPLASH_SECONDS:
+                state["done"] = True
+                done()
+                return False
+        Clock.schedule_interval(tick, 1 / 30.0)
 
     def show(self, widget):
         self.root_box.clear_widgets()
@@ -287,6 +466,7 @@ class StoreApp(App):
         accs.append({"email": email, "name": u["name"], "token": res["token"]})
         P["accounts"] = accs
         P["active"] = email
+        P["guest"] = False
         save_prefs()
 
     def notice(self, msg):
@@ -371,10 +551,19 @@ class StoreApp(App):
         go.bind(on_release=submit)
         col.add_widget(go)
 
+        if not can_cancel:
+            skip = pill("Skip for now", CHIP_BG, DARK, h=44, bold=False)
+            skip.bind(on_release=lambda *a: self.skip_login())
+            col.add_widget(skip)
+
         if can_cancel:
             cancel = pill("Cancel", CHIP_BG, DARK, h=44, bold=False)
             cancel.bind(on_release=lambda *a: self.show_main())
             col.add_widget(cancel)
+
+        diag = pill("Test connection", CHIP_BG, GRAY, h=34, size="12sp", bold=False)
+        diag.bind(on_release=lambda *a: self.diagnose())
+        col.add_widget(diag)
 
         sv.add_widget(col)
         self.show(sv)
@@ -382,6 +571,25 @@ class StoreApp(App):
     def do_register(self, name, email, pw):
         run_bg(lambda: call("/api/register", {"name": name, "email": email, "password": pw}),
                lambda res, e: self.after_auth(res, e, "signup", email))
+
+    def is_guest(self):
+        return self.active() is None
+
+    def skip_login(self):
+        if P["accepted"].get("guest") == TERMS_VERSION:
+            self.enter_guest()
+        else:
+            self.show_terms("guest", self.enter_guest, back=lambda: self.show_auth())
+
+    def enter_guest(self):
+        P["guest"] = True
+        save_prefs()
+        self.show_main()
+
+    def need_login(self, what):
+        self.popup("Sign in required",
+                   "You need an account to %s. Browsing is free for guests." % what,
+                   yes=lambda: self.show_auth("signin", can_cancel=True), yes_label="Sign in")
 
     def after_auth(self, res, err, mode, email):
         if err:
@@ -500,7 +708,7 @@ class StoreApp(App):
         trow = BoxLayout(size_hint_y=None, height=dp(40))
         trow.add_widget(text("[b]My Store[/b]", size="22sp", color=WHITE))
         acct = self.active()
-        av = Button(text=esc((acct["name"] if acct else "?")[:1].upper()), size_hint=(None, None),
+        av = Button(text=esc((acct["name"] if acct else "G")[:1].upper()), size_hint=(None, None),
                     size=(dp(38), dp(38)), background_normal="", background_down="",
                     background_color=(0, 0, 0, 0), color=ACCENT, bold=True, font_size="16sp")
         paint(av, WHITE, 19)
@@ -743,6 +951,9 @@ class StoreApp(App):
         self.popup("App details", msg, extra=("Report", lambda: self.report(app_id)))
 
     def get_app(self, app_id):
+        if self.is_guest():
+            self.need_login("install apps")
+            return
         a = self.items[app_id]
         warn = ""
         if not a.get("verified") and P["warn_unverified"]:
@@ -799,6 +1010,9 @@ class StoreApp(App):
             self.say("Saved. Open it from your file manager to install: " + path)
 
     def vote(self, app_id):
+        if self.is_guest():
+            self.need_login("share feedback")
+            return
         body = {"device": self.device, "hash_ok": True, "works": True}
         tok = self.token()
         run_bg(lambda: call("/api/verify/%s" % app_id, body, tok),
@@ -806,6 +1020,9 @@ class StoreApp(App):
                              self.load()))
 
     def report(self, app_id):
+        if self.is_guest():
+            self.need_login("report an app")
+            return
         body = {"device": self.device, "reason": "reported from app"}
         tok = self.token()
         run_bg(lambda: call("/api/report/%s" % app_id, body, tok),
@@ -854,7 +1071,8 @@ class StoreApp(App):
         g.add_widget(r)
 
     def build_settings(self):
-        acct = self.active() or {"name": "Guest", "email": ""}
+        acct = self.active() or {"name": "Guest", "email": "Browsing as guest"}
+        guest = self.active() is None
         sv = ScrollView(bar_width=dp(3))
         col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
                         padding=[dp(12), dp(12), dp(12), dp(24)])
@@ -873,13 +1091,17 @@ class StoreApp(App):
         col.add_widget(prof)
 
         g = self.group(col, "ACCOUNT")
-        self.row(g, "Edit display name", acct["name"], self.edit_name)
-        self.row(g, "Change password", "Signs out your other devices", self.change_password)
-        self.row(g, "Switch account", "%d on this phone" % len(P["accounts"]), self.switch_popup)
-        self.row(g, "Add another account", "Sign in or create a new account",
-                 lambda: self.show_auth("signin", can_cancel=True))
-        self.row(g, "Sign out", "", lambda: self.popup(
-            "Sign out?", "You can sign back in any time.", yes=self.sign_out, yes_label="Sign out"))
+        if guest:
+            self.row(g, "Sign in or create account", "Needed to install apps and share feedback",
+                     lambda: self.show_auth("signin", can_cancel=True))
+        else:
+            self.row(g, "Edit display name", acct["name"], self.edit_name)
+            self.row(g, "Change password", "Signs out your other devices", self.change_password)
+            self.row(g, "Switch account", "%d on this phone" % len(P["accounts"]), self.switch_popup)
+            self.row(g, "Add another account", "Sign in or create a new account",
+                     lambda: self.show_auth("signin", can_cancel=True))
+            self.row(g, "Sign out", "", lambda: self.popup(
+                "Sign out?", "You can sign back in any time.", yes=self.sign_out, yes_label="Sign out"))
 
         g = self.group(col, "STORE PREFERENCES")
         self.toggle_row(g, "Warn about unverified apps", "Ask before installing", "warn_unverified")
@@ -896,14 +1118,21 @@ class StoreApp(App):
         self.row(g, "Store server", SERVER.replace("https://", ""))
         self.row(g, "Test connection", "", self.test_connection)
 
+        if not guest and (P.get("dev_unlocked") or not HIDE_PUBLISH_REQUEST):
+            g = self.group(col, "PUBLISH AN APP")
+            self.row(g, "Request to publish an app", "For apps you can't put on Google Play",
+                     self.publish_form)
+            self.row(g, "My requests", "See if they were approved", self.my_requests)
+
         g = self.group(col, "ABOUT & LEGAL")
         for key, title, body in POLICIES:
             self.row(g, title, "", lambda t=title, b=body: self.text_popup(t, b))
-        self.row(g, "My Store", "Version %s" % APP_VERSION)
+        self.row(g, "My Store", "Version %s" % APP_VERSION, self.version_tap)
 
-        g = self.group(col, "DANGER ZONE")
-        self.row(g, "Delete account", "Permanently removes your account and votes",
-                 self.delete_account, danger=True)
+        if not guest:
+            g = self.group(col, "DANGER ZONE")
+            self.row(g, "Delete account", "Permanently removes your account and votes",
+                     self.delete_account, danger=True)
 
         sv.add_widget(col)
         return sv
@@ -1037,6 +1266,149 @@ class StoreApp(App):
         save_prefs()
         self.notice("Removed %d files" % n)
         self.switch_tab("settings")
+
+    def version_tap(self):
+        if P.get("dev_unlocked") or not HIDE_PUBLISH_REQUEST:
+            return
+        now = time.time()
+        if now - getattr(self, "_tap_time", 0) > 2:
+            self._taps = 0
+        self._tap_time = now
+        self._taps = getattr(self, "_taps", 0) + 1
+        if self._taps >= 7:
+            self._taps = 0
+            P["dev_unlocked"] = True
+            save_prefs()
+            self.notice("Publish option unlocked")
+            self.switch_tab("settings")
+        elif self._taps >= 4:
+            self.notice("%d more taps..." % (7 - self._taps))
+
+    def back_to_settings(self):
+        self.show_main()
+        self.switch_tab("settings")
+
+    def diagnose(self):
+        def done(r, e):
+            info = "Server: %s\nCertificates: %s" % (esc(SERVER), esc(CERT_SOURCE))
+            if e:
+                self.popup("Connection failed", info + "\n\n" + esc(e))
+            else:
+                self.popup("Connected", info + "\n\nThe server answered.")
+        self.notice("Testing...")
+        run_bg(lambda: call("/api/ping"), done)
+
+    def publish_form(self):
+        acct = self.active() or {"email": ""}
+        sv = ScrollView(bar_width=dp(3))
+        col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
+                        padding=[dp(16), dp(20), dp(16), dp(28)])
+        col.bind(minimum_height=col.setter("height"))
+        col.add_widget(text("[b]Request to publish an app[/b]", size="20sp", height=dp(36)))
+        col.add_widget(auto_text("Every request is reviewed before it appears in the store. "
+                                 "Only send apps you own or have permission to share.",
+                                 size="13sp", color=GRAY))
+        state = {"kind": "original", "rights": False}
+
+        kind_btn = pill("Type: Original app", CHIP_BG, DARK, h=44)
+
+        def flip_kind(*a):
+            state["kind"] = "mod" if state["kind"] == "original" else "original"
+            kind_btn.text = "Type: Modded version" if state["kind"] == "mod" else "Type: Original app"
+        kind_btn.bind(on_release=flip_kind)
+        col.add_widget(kind_btn)
+
+        box, name_in = field("App name")
+        col.add_widget(box)
+        box, ver_in = field("Version (e.g. 1.2.0)")
+        col.add_widget(box)
+        box, cat_in = field("Category (e.g. Games, Tools)")
+        col.add_widget(box)
+        box, mod_in = field("Modded version of which app? (mods only)")
+        col.add_widget(box)
+        box, pkg_in = field("Package name (optional, e.g. com.company.app)")
+        col.add_widget(box)
+        box, url_in = field("Download link (https://...)")
+        col.add_widget(box)
+        box, desc_in = area("What does the app do? What is changed in this version?")
+        col.add_widget(box)
+        box, why_in = area("Why is it not on Google Play?", h=90)
+        col.add_widget(box)
+        box, contact_in = field("Your contact (email or Telegram)", default=acct["email"])
+        col.add_widget(box)
+
+        col.add_widget(auto_text("I own this app, or its owner or license lets me share it. It has no "
+                                 "malware, and it is not a paid app with the payment removed.",
+                                 size="12sp", color=GRAY))
+        rights = pill("I confirm", CHIP_BG, DARK, h=40, bold=False)
+
+        def flip_rights(inst):
+            state["rights"] = not state["rights"]
+            inst.text = "Confirmed" if state["rights"] else "I confirm"
+            inst.color = ACCENT if state["rights"] else DARK
+            inst.bold = state["rights"]
+        rights.bind(on_release=flip_rights)
+        col.add_widget(rights)
+
+        err = text("", size="13sp", color=RED, height=dp(36))
+        col.add_widget(err)
+        send = pill("Send request", ACCENT, WHITE, h=52, size="16sp")
+
+        def submit(*a):
+            if not state["rights"]:
+                err.color = RED
+                err.text = "Please confirm you have the right to share this app"
+                return
+            payload = {
+                "name": name_in.text.strip(), "version": ver_in.text.strip(),
+                "category": cat_in.text.strip(), "kind": state["kind"],
+                "mod_of": mod_in.text.strip(), "package": pkg_in.text.strip(),
+                "description": desc_in.text.strip(), "url": url_in.text.strip(),
+                "reason": why_in.text.strip(), "contact": contact_in.text.strip(),
+                "rights": True}
+            tok = self.token()
+            err.color = GRAY
+            err.text = "Sending..."
+
+            def done(res, e):
+                if e:
+                    err.color = RED
+                    err.text = esc(e)
+                    return
+                self.notice("Request sent. We will review it.")
+                self.back_to_settings()
+            run_bg(lambda: call("/api/submit", payload, tok), done)
+        send.bind(on_release=submit)
+        col.add_widget(send)
+
+        back = pill("Cancel", CHIP_BG, DARK, h=44, bold=False)
+        back.bind(on_release=lambda *a: self.back_to_settings())
+        col.add_widget(back)
+
+        sv.add_widget(col)
+        self.show(sv)
+
+    def my_requests(self):
+        tok = self.token()
+
+        def done(rows, e):
+            if e:
+                self.popup("My requests", esc(e))
+                return
+            if not rows:
+                self.popup("My requests", "You have not sent any requests yet.")
+                return
+            labels = {"pending": "Waiting for review", "approved": "Approved and published",
+                      "rejected": "Not approved"}
+            lines = []
+            for r in rows:
+                line = "[b]%s[/b]  v%s\n%s" % (esc(r["name"]), esc(r["version"]),
+                                              labels.get(r["status"], esc(r["status"])))
+                if r.get("note"):
+                    line += "\n" + esc(r["note"])
+                lines.append(line)
+            self.popup("My requests", "\n\n".join(lines))
+        run_bg(lambda: call("/api/submissions/mine", token=tok), done)
 
     def test_connection(self):
         self.notice("Testing...")

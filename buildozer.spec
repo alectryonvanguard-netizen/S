@@ -8,6 +8,10 @@ version = 1.0
 
 requirements = python3,kivy==2.3.0,pyjnius,android,certifi
 
+icon.filename = %(source.dir)s/icon.png
+presplash.filename = %(source.dir)s/presplash.png
+android.presplash_color = #F2F5FA
+
 orientation = portrait
 fullscreen = 0
 

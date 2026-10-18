@@ -10,7 +10,7 @@ import hashlib
 import threading
 import traceback
 from urllib.request import urlopen, Request
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs
 from urllib.error import HTTPError
 
 from kivy.app import App
@@ -18,12 +18,14 @@ from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.uix.anchorlayout import AnchorLayout
+from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.image import Image
 from kivy.uix.widget import Widget
 from kivy.uix.button import Button
 from kivy.uix.label import Label
+from kivy.uix.modalview import ModalView
 from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
@@ -44,6 +46,7 @@ APP_VERSION = "1.0"
 TERMS_VERSION = "2026-10"
 SESSION_EXPIRED = "Session expired"
 SPLASH_SECONDS = 5     # how long the loading screen stays
+HOME_LOGO = "logo_s.png"     # the colourful S ("logo_m.png" gives the M instead)
 HIDE_PUBLISH_REQUEST = True   # True: "Publish an app" stays hidden until Version is tapped 7 times
 
 # ---------------------------------------------------------------- colors
@@ -93,7 +96,8 @@ def default_prefs():
     return {"server": SERVER, "accounts": [], "active": "", "accepted": {},
             "warn_unverified": True, "ask_verify": True, "show_mods": True,
             "show_external": True, "sort": "popular", "downloads": [],
-            "dev_unlocked": False, "guest": False}
+            "dev_unlocked": False, "guest": False,
+            "tracked": {}, "notify_updates": True, "perm_asked": False}
 
 
 def load_prefs():
@@ -263,6 +267,169 @@ def avatar(name, size, bg=WHITE, fg=ACCENT):
                          size="%dsp" % int(size * 0.45), color=fg, halign="center"))
     holder.add_widget(tile)
     return holder
+
+
+# ---------------------------------------------------------------- dark theme (main shell)
+NAVY = (0.027, 0.035, 0.094, 1)
+NAV_BG = (0.043, 0.059, 0.153, 1)
+CARD_D = (0.063, 0.082, 0.188, 1)
+LINE_D = (0.12, 0.155, 0.33, 1)
+TXT = (0.94, 0.96, 1.0, 1)
+SUB = (0.58, 0.63, 0.80, 1)
+CYAN = (0.13, 0.83, 0.93, 1)
+VIOLET = (0.66, 0.33, 0.97, 1)
+ORANGE = (1.0, 0.55, 0.15, 1)
+CHIP_ON = (0.05, 0.27, 0.37, 1)
+TAG_BG = (0.50, 0.22, 0.85, 1)
+BANNER_BG = (0.10, 0.08, 0.35, 1)
+BLUE_A = (0.0, 0.62, 0.96, 1)
+BLUE_B = (0.25, 0.35, 0.96, 1)
+CYAN_A = (0.0, 0.85, 0.95, 1)
+CYAN_B = (0.10, 0.45, 0.95, 1)
+GAME_WORDS = ("game", "action", "adventure", "racing", "puzzle", "arcade", "strategy", "rpg",
+              "simulation", "shooter")
+
+
+class Dialog(ModalView):
+    """Rounded dark card with a coloured title line. Used instead of the plain Kivy Popup."""
+
+    def __init__(self, title="", content=None, size_hint=(0.9, None), **kw):
+        kw.pop("separator_height", None)           # old Popup argument
+        super().__init__(size_hint=size_hint, background="", background_color=(0, 0, 0, 0),
+                         overlay_color=(0, 0, 0, 0.65), **kw)
+        self.title, self.content = title, content
+        card = BoxLayout(orientation="vertical", padding=[dp(18), dp(16), dp(18), dp(16)], spacing=dp(10))
+        paint(card, CARD_D, 22)
+        if title:
+            card.add_widget(text("[b]%s[/b]" % esc(title), size="18sp", color=TXT, height=dp(30)))
+            line = Widget(size_hint_y=None, height=dp(3))
+            paint_grad(line, CYAN_A, VIOLET, 2)
+            card.add_widget(line)
+        if content is not None:
+            card.add_widget(content)
+        self.add_widget(card)
+
+
+# brand-coloured tiles shown until (or instead of) a real icon picture
+BRAND = (
+    ("whatsapp", (0.15, 0.83, 0.40), WHITE), ("tiktok", (0.04, 0.04, 0.06), (0.15, 0.95, 0.93, 1)),
+    ("instagram", (0.83, 0.20, 0.50), WHITE), ("spotify", (0.11, 0.73, 0.33), WHITE),
+    ("youtube", (0.92, 0.07, 0.07), WHITE), ("facebook", (0.09, 0.47, 0.95), WHITE),
+    ("messenger", (0.0, 0.52, 1.0), WHITE), ("telegram", (0.16, 0.64, 0.90), WHITE),
+    ("snapchat", (1.0, 0.95, 0.0), (0.1, 0.1, 0.1, 1)), ("netflix", (0.06, 0.06, 0.06), (0.9, 0.05, 0.08, 1)),
+    ("discord", (0.35, 0.40, 0.95), WHITE), ("linkedin", (0.04, 0.40, 0.76), WHITE),
+    ("pinterest", (0.90, 0.0, 0.14), WHITE), ("reddit", (1.0, 0.27, 0.0), WHITE),
+    ("twitch", (0.57, 0.27, 1.0), WHITE), ("zoom", (0.18, 0.55, 1.0), WHITE),
+    ("minecraft", (0.38, 0.62, 0.22), WHITE), ("roblox", (0.90, 0.10, 0.10), WHITE),
+    ("free fire", (1.0, 0.55, 0.0), WHITE), ("call of duty", (0.15, 0.17, 0.15), WHITE),
+    ("pubg", (0.90, 0.55, 0.10), WHITE), ("genshin", (0.30, 0.55, 0.95), WHITE),
+    ("clash", (0.95, 0.60, 0.10), WHITE), ("candy", (0.95, 0.35, 0.65), WHITE),
+    ("uber", (0.05, 0.05, 0.05), WHITE), ("bolt", (0.20, 0.80, 0.45), WHITE),
+    ("amazon", (1.0, 0.60, 0.0), (0.1, 0.1, 0.1, 1)), ("temu", (1.0, 0.45, 0.10), WHITE),
+    ("duolingo", (0.35, 0.80, 0.0), WHITE), ("canva", (0.0, 0.76, 0.80), WHITE),
+    ("capcut", (0.05, 0.05, 0.05), WHITE), ("paypal", (0.0, 0.19, 0.53), WHITE),
+    ("signal", (0.23, 0.46, 0.96), WHITE), ("viber", (0.45, 0.30, 0.78), WHITE),
+    ("skype", (0.0, 0.69, 0.94), WHITE), ("disney", (0.07, 0.12, 0.40), WHITE),
+    ("wattpad", (1.0, 0.45, 0.0), WHITE), ("webtoon", (0.0, 0.78, 0.35), WHITE),
+    ("kindle", (0.10, 0.45, 0.80), WHITE), ("gmail", (0.86, 0.22, 0.17), WHITE),
+)
+
+
+def brand(name):
+    """(background, letter colour) for an app tile."""
+    n = (name or "").lower().strip()
+    if n in ("x", "x (twitter)", "twitter"):
+        return (0.05, 0.05, 0.05, 1), WHITE
+    for key, bg, fg in BRAND:
+        if key in n:
+            return tuple(bg) + (1,), fg
+    return ICON_COLORS[sum(ord(c) for c in n) % len(ICON_COLORS)], WHITE
+
+
+ICON_SLOTS = threading.Semaphore(4)           # at most 4 icon downloads at once
+ICON_DIR = os.path.join(HERE, "icons_cache")
+
+
+def cached_icon(url):
+    base = os.path.join(ICON_DIR, hashlib.sha1(url.encode()).hexdigest())
+    for ext in ("png", "jpg", "webp"):
+        if os.path.exists(base + "." + ext):
+            return base + "." + ext
+    return None
+
+
+def fetch_icon(url):
+    """Download an icon picture once and keep it on the phone."""
+    found = cached_icon(url)
+    if found:
+        return found
+    with ICON_SLOTS:
+        with urlopen(Request(url, headers={"User-Agent": "MyStore"}), timeout=15, context=SSL_CTX) as r:
+            data = r.read(400 * 1024 + 1)
+    if len(data) > 400 * 1024:
+        raise Exception("icon too big")
+    if data.startswith(b"\x89PNG"):
+        ext = "png"
+    elif data[:3] == b"\xff\xd8\xff":
+        ext = "jpg"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        ext = "webp"
+    else:
+        raise Exception("not a picture")
+    os.makedirs(ICON_DIR, exist_ok=True)
+    path = os.path.join(ICON_DIR, hashlib.sha1(url.encode()).hexdigest() + "." + ext)
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+class RoundedIcon(Widget):
+    """A picture drawn with rounded corners."""
+
+    def __init__(self, path, corner=14, **kw):
+        super().__init__(**kw)
+        from kivy.core.image import Image as CoreImage
+        self.tex = CoreImage(path, ext=path.rsplit(".", 1)[-1]).texture
+        self.corner = corner
+        self.bind(pos=self.redraw, size=self.redraw)
+
+    def redraw(self, *a):
+        from kivy.graphics import Color, RoundedRectangle
+        self.canvas.clear()
+        with self.canvas:
+            Color(1, 1, 1, 1)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(self.corner)], texture=self.tex)
+
+
+class TapBox(ButtonBehavior, BoxLayout):
+    """A layout you can tap."""
+
+
+def paint_grad(w, c1, c2, radius=14):
+    """Rounded background with a left-to-right colour fade (falls back to a flat colour)."""
+    try:
+        from kivy.graphics import Color, RoundedRectangle
+        tex = gradient_texture(tuple(int(x * 255) for x in c1[:3]), tuple(int(x * 255) for x in c2[:3]))
+        rad = [dp(x) for x in radius] if isinstance(radius, (list, tuple)) else [dp(radius)]
+        with w.canvas.before:
+            Color(1, 1, 1, 1)
+            r = RoundedRectangle(pos=w.pos, size=w.size, radius=rad, texture=tex)
+        w.bind(pos=lambda i, v: setattr(r, "pos", v), size=lambda i, v: setattr(r, "size", v))
+    except Exception:
+        paint(w, c1, radius)
+
+
+def gpill(label, c1, c2, h=36, size="13sp"):
+    b = Button(text=label, size_hint_y=None, height=dp(h), background_normal="",
+               background_down="", background_color=(0, 0, 0, 0), color=WHITE,
+               font_size=size, bold=True)
+    paint_grad(b, c1, c2, radius=h / 2)
+    return b
+
+
+def is_game(a):
+    c = (a.get("category") or "").lower()
+    return any(w in c for w in GAME_WORDS)
 
 
 def is_store_link(a):
@@ -468,17 +635,25 @@ class StoreApp(App):
         u = res["user"]
         email = u["email"].lower()
         accs = [a for a in P["accounts"] if a["email"] != email]
-        accs.append({"email": email, "name": u["name"], "token": res["token"]})
+        accs.append({"email": email, "name": u["name"], "token": res["token"],
+                     "provider": u.get("provider", "password")})
         P["accounts"] = accs
         P["active"] = email
         P["guest"] = False
         save_prefs()
 
     def notice(self, msg):
-        pop = Popup(title="", content=text(esc(msg), color=WHITE, halign="center"),
-                    size_hint=(0.8, 0.16), separator_height=0)
-        pop.open()
-        Clock.schedule_once(lambda dt: pop.dismiss(), 1.8)
+        """Small rounded toast near the bottom of the screen."""
+        try:
+            tag = BoxLayout(size_hint=(None, None), size=(min(Window.width * 0.88, dp(420)), dp(50)),
+                            padding=[dp(16), 0])
+            paint(tag, (0.14, 0.18, 0.38, 1), 25)
+            tag.add_widget(text(esc(msg), size="14sp", color=TXT, halign="center"))
+            tag.pos = ((Window.width - tag.width) / 2, dp(90))
+            Window.add_widget(tag)
+            Clock.schedule_once(lambda dt: Window.remove_widget(tag), 2.4)
+        except Exception:
+            self.say(msg)
 
     # ============================================================ sign in / sign up
     def show_auth(self, mode="signin", message="", prefill="", can_cancel=False):
@@ -556,6 +731,10 @@ class StoreApp(App):
         go.bind(on_release=submit)
         col.add_widget(go)
 
+        google = pill("Continue with Google", WHITE, DARK, h=48, size="15sp")
+        google.bind(on_release=lambda *a: self.google_login())
+        col.add_widget(google)
+
         if not can_cancel:
             skip = pill("Skip for now", CHIP_BG, DARK, h=44, bold=False)
             skip.bind(on_release=lambda *a: self.skip_login())
@@ -632,6 +811,115 @@ class StoreApp(App):
             self.show_verify(name, email, message=err)
             return
         self.after_auth(res, None, "signup", email)
+
+    # ---- Google sign-in (the phone opens the browser; the server checks Google; a link brings us back)
+    def google_login(self):
+        self._google_state = uuid.uuid4().hex + uuid.uuid4().hex     # 64 characters, only this phone knows it
+        self.open_url("%s/auth/google/start?state=%s" % (SERVER, self._google_state))
+
+    def handle_link(self, url):
+        try:
+            u = urlparse(url or "")
+            if u.scheme != "mystore" or u.netloc != "auth":
+                return
+            q = parse_qs(u.query)
+            code, state = (q.get("code") or [""])[0], (q.get("state") or [""])[0]
+        except Exception:
+            return
+        if not code or not getattr(self, "_google_state", None) or state != self._google_state:
+            self.notice("That sign-in link is not for this phone")
+            return
+        self._google_state = None
+        self.notice("Signing you in...")
+        run_bg(lambda: call("/api/google/exchange", {"code": code}),
+               lambda res, e: self.after_google(res, e))
+
+    def after_google(self, res, err):
+        if err:
+            self.show_auth("signin", message=err)
+            return
+        self.after_auth(res, None, "google", res["user"]["email"])
+
+    def on_new_intent(self, intent):
+        try:
+            data = intent.getData()
+            url = data.toString() if data else ""
+        except Exception:
+            return
+        Clock.schedule_once(lambda dt: self.handle_link(url), 0)
+
+    def on_start(self):
+        try:
+            from android import activity
+            activity.bind(on_new_intent=self.on_new_intent)
+            from jnius import autoclass
+            data = autoclass("org.kivy.android.PythonActivity").mActivity.getIntent().getData()
+            if data:
+                url = data.toString()
+                Clock.schedule_once(lambda dt: self.handle_link(url), 1.5)
+        except Exception:
+            pass                      # not on a phone
+
+    def on_pause(self):
+        return True                   # stay alive while the browser or installer is on screen
+
+    def on_resume(self):
+        path = getattr(self, "_pending_install", None)
+        if path and self.can_install():
+            self._pending_install = None
+            Clock.schedule_once(lambda dt: self.try_install(path), 0.5)
+        return True
+
+    def ask_permissions(self):
+        """Ask once for notifications (and storage on old phones)."""
+        if P.get("perm_asked"):
+            return
+        try:
+            from android.permissions import request_permissions
+            request_permissions(["android.permission.POST_NOTIFICATIONS",
+                                 "android.permission.WRITE_EXTERNAL_STORAGE",
+                                 "android.permission.READ_EXTERNAL_STORAGE"])
+            P["perm_asked"] = True
+            save_prefs()
+        except Exception:
+            pass                      # not on a phone
+
+    def notify(self, title, message):
+        try:
+            from jnius import autoclass
+            from store_notify import post_notification
+            post_notification(autoclass("org.kivy.android.PythonActivity").mActivity, title, message)
+        except Exception:
+            self.notice(message)
+
+    def sync_service(self):
+        """Run the update checker in the background only when there is something to watch."""
+        try:
+            from jnius import autoclass
+            Activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            service = autoclass("org.mystore.mystore.ServiceUpdates")
+            if P.get("notify_updates", True):
+                service.start(Activity, "")
+            else:
+                service.stop(Activity)
+        except Exception:
+            pass                      # not on a phone, or the service is not in this build
+
+    def open_url(self, url):
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            Activity = autoclass("org.kivy.android.PythonActivity")
+            i = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            Activity.mActivity.startActivity(i)
+        except Exception:
+            try:
+                import webbrowser
+                webbrowser.open(url)
+            except Exception:
+                self.say("Open this link in your browser: " + url)
 
     def is_guest(self):
         return self.active() is None
@@ -733,89 +1021,149 @@ class StoreApp(App):
     def show_main(self):
         self.store_view = self.build_store()
         self.content = BoxLayout()
-        nav = BoxLayout(size_hint_y=None, height=dp(58), padding=[dp(10), dp(6)], spacing=dp(8))
-        paint(nav, WHITE, [18, 18, 0, 0])
-        self.nav_btns = {}
-        for key, label in (("store", "Store"), ("settings", "Settings")):
-            b = Button(text=label, background_normal="", background_down="",
-                       background_color=(0, 0, 0, 0), font_size="15sp")
-            b.bind(on_release=lambda i, k=key: self.switch_tab(k))
-            self.nav_btns[key] = b
-            nav.add_widget(b)
+        nav = BoxLayout(size_hint_y=None, height=dp(66), padding=[dp(6), dp(6)], spacing=dp(2))
+        paint(nav, NAV_BG, [20, 20, 0, 0])
+        self.nav_items = {}
+        for key, label, icon in (("home", "Home", "nav_home.png"), ("games", "Games", "nav_games.png"),
+                                 ("apps", "Apps", "nav_apps.png"),
+                                 ("downloads", "Downloads", "nav_downloads.png"),
+                                 ("profile", "Profile", "nav_profile.png")):
+            item = TapBox(orientation="vertical", spacing=dp(2), padding=[0, dp(2), 0, 0])
+            img = make_image(icon)
+            if img is None:
+                img = Widget()
+            img.size_hint_y = 0.62
+            lbl = Label(text=label, font_size="11sp", color=SUB, size_hint_y=0.38)
+            item.add_widget(img)
+            item.add_widget(lbl)
+            item.bind(on_release=lambda *a, k=key: self.switch_tab(k))
+            self.nav_items[key] = (img, lbl)
+            nav.add_widget(item)
         col = BoxLayout(orientation="vertical")
+        paint(col, NAVY, 0)
         col.add_widget(self.content)
         col.add_widget(nav)
         self.show(col)
-        self.switch_tab("store")
+        self.switch_tab("home")
         self.load()
+        Clock.schedule_once(lambda dt: self.ask_permissions(), 1.5)
+        Clock.schedule_once(lambda dt: self.sync_service(), 3)
 
     def switch_tab(self, key):
+        key = {"store": "home", "settings": "profile"}.get(key, key)
         self.content.clear_widgets()
-        self.content.add_widget(self.store_view if key == "store" else self.build_settings())
+        if key == "profile":
+            self.content.add_widget(self.build_settings())
+        elif key == "downloads":
+            self.content.add_widget(self.build_downloads())
+        else:
+            self.content.add_widget(self.store_view)
+            self.set_mode(key if key in ("home", "games", "apps") else "home")
         self.tab = key
-        for k, b in self.nav_btns.items():
-            b.color = ACCENT if k == key else GRAY
-            b.bold = (k == key)
+        self.update_nav(key)
 
-    # ============================================================ store tab
+    def update_nav(self, key):
+        for k, (img, lbl) in self.nav_items.items():
+            col = CYAN if k == key else SUB
+            lbl.color = col
+            lbl.bold = (k == key)
+            try:
+                img.color = col
+            except Exception:
+                pass
+
+    # ============================================================ home / store tab
     def build_store(self):
-        self.kind, self.cat = "", ""
+        self.mode, self.kind, self.cat = "home", "", ""
+        self.limit = 60                      # apps shown in a results list before "Show more"
         self.sort = P["sort"]
         view = BoxLayout(orientation="vertical", spacing=dp(6))
+        paint(view, NAVY, 0)
 
-        header = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(134),
-                           padding=[dp(14), dp(12), dp(14), dp(14)], spacing=dp(8))
-        paint(header, HEADER, [0, 0, 26, 26])
-        trow = BoxLayout(size_hint_y=None, height=dp(40))
-        trow.add_widget(text("[b]My Store[/b]", size="22sp", color=WHITE))
-        acct = self.active()
-        av = Button(text=esc((acct["name"] if acct else "G")[:1].upper()), size_hint=(None, None),
-                    size=(dp(38), dp(38)), background_normal="", background_down="",
-                    background_color=(0, 0, 0, 0), color=ACCENT, bold=True, font_size="16sp")
-        paint(av, WHITE, 19)
-        av.bind(on_release=lambda *a: self.switch_tab("settings"))
-        trow.add_widget(av)
-        header.add_widget(trow)
+        head = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(142),
+                         padding=[dp(14), dp(12), dp(14), dp(2)], spacing=dp(10))
+        top = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(10))
+        logo = make_image(HOME_LOGO)
+        if logo:
+            logo.size_hint = (None, None)
+            logo.size = (dp(56), dp(56))
+            top.add_widget(logo)
+        else:
+            top.add_widget(avatar("M", 56, bg=ACCENT, fg=WHITE))
+        tcol = BoxLayout(orientation="vertical", spacing=dp(2))
+        title = make_image("title_tight.png")
+        if title:
+            title.size_hint = (None, None)
+            title.size = (dp(158), dp(32))
+            tcol.add_widget(title)
+        else:
+            tcol.add_widget(text("[b]My [color=22d3ee]Store[/color][/b]", size="26sp", color=TXT,
+                                 height=dp(34)))
+        tcol.add_widget(text("Discover  \u00b7  Download  \u00b7  Enjoy", size="12sp", color=SUB,
+                             height=dp(18)))
+        top.add_widget(tcol)
 
-        bar = BoxLayout(size_hint_y=None, height=dp(48), padding=[dp(4), 0], spacing=dp(2))
-        paint(bar, WHITE, 24)
-        self.search = TextInput(hint_text="Search apps, games, developers", multiline=False,
+        sbtn = TapBox(size_hint=(None, None), size=(dp(46), dp(46)), padding=dp(12))
+        paint(sbtn, CARD_D, 23)
+        ic = make_image("ic_search.png")
+        if ic:
+            ic.color = CYAN
+            sbtn.add_widget(ic)
+        sbtn.bind(on_release=lambda *a: setattr(self.search, "focus", True))
+        holder = AnchorLayout(size_hint=(None, 1), width=dp(46))
+        holder.add_widget(sbtn)
+        top.add_widget(holder)
+        head.add_widget(top)
+
+        bar = BoxLayout(size_hint_y=None, height=dp(48), padding=[dp(14), 0, dp(4), 0], spacing=dp(6))
+        paint(bar, CARD_D, 24)
+        mag = make_image("ic_search.png")
+        if mag:
+            mag.color = SUB
+            mag.size_hint = (None, None)
+            mag.size = (dp(20), dp(20))
+            mh = AnchorLayout(size_hint=(None, 1), width=dp(22))
+            mh.add_widget(mag)
+            bar.add_widget(mh)
+        self.search = TextInput(hint_text="Search apps, games, and more...", multiline=False,
                                 background_normal="", background_active="",
-                                background_color=(0, 0, 0, 0), foreground_color=DARK,
-                                hint_text_color=(0.55, 0.57, 0.62, 1), cursor_color=ACCENT,
-                                padding=[dp(14), dp(14), dp(4), dp(10)])
+                                background_color=(0, 0, 0, 0), foreground_color=TXT,
+                                hint_text_color=SUB, cursor_color=CYAN,
+                                padding=[dp(4), dp(14), dp(4), dp(10)])
         self.search.bind(text=self.on_search_text)
         clear = Button(text="X", size_hint_x=None, width=dp(44), background_normal="",
-                       background_down="", background_color=(0, 0, 0, 0), color=GRAY, bold=True)
+                       background_down="", background_color=(0, 0, 0, 0), color=SUB, bold=True)
         clear.bind(on_release=lambda *a: setattr(self.search, "text", ""))
         bar.add_widget(self.search)
         bar.add_widget(clear)
-        header.add_widget(bar)
-        view.add_widget(header)
+        head.add_widget(bar)
+        view.add_widget(head)
 
+        self.chip_row = self.make_chip_row()
         self.kind_row = self.make_chip_row()
-        self.cat_row = self.make_chip_row()
+        view.add_widget(self.chip_row[0])
         view.add_widget(self.kind_row[0])
-        view.add_widget(self.cat_row[0])
+        self.refresh_chips()
         self.refresh_kinds()
 
-        srow = BoxLayout(size_hint_y=None, height=dp(34), padding=[dp(14), 0])
-        self.status = text("Starting...", size="12sp", color=GRAY)
+        self.srow = BoxLayout(size_hint_y=None, height=dp(34), padding=[dp(14), 0])
+        self.status = text("", size="12sp", color=SUB)
         self.sort_btn = pill("Sort: Popular" if self.sort == "popular" else "Sort: Newest",
-                             CHIP_BG, DARK, h=30, size="12sp", bold=False)
+                             LINE_D, TXT, h=30, size="12sp", bold=False)
         self.sort_btn.size_hint_x = None
         self.sort_btn.width = dp(120)
         self.sort_btn.bind(on_release=lambda *a: self.toggle_sort())
-        srow.add_widget(self.status)
-        srow.add_widget(self.sort_btn)
-        view.add_widget(srow)
+        self.srow.add_widget(self.status)
+        self.srow.add_widget(self.sort_btn)
+        view.add_widget(self.srow)
 
         scroll = ScrollView(bar_width=dp(3))
-        self.box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
+        self.box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(14),
                              padding=[dp(12), dp(4), dp(12), dp(16)])
         self.box.bind(minimum_height=self.box.setter("height"))
         scroll.add_widget(self.box)
         view.add_widget(scroll)
+        self.set_results_chrome(False)
         return view
 
     def make_chip_row(self):
@@ -826,12 +1174,43 @@ class StoreApp(App):
         return sv, inner
 
     def chip(self, label, active, action):
-        b = Button(text=esc(label), size_hint=(None, 1), width=dp(30) + dp(8) * len(label),
+        b = Button(text=esc(label), size_hint=(None, 1), width=dp(34) + dp(8) * len(label),
                    background_normal="", background_down="", background_color=(0, 0, 0, 0),
-                   color=WHITE if active else DARK, font_size="13sp", bold=active)
-        paint(b, ACCENT if active else CHIP_BG, 18)
+                   color=CYAN if active else TXT, font_size="13sp", bold=active)
+        paint(b, CHIP_ON if active else CARD_D, 18)
         b.bind(on_release=lambda *a: action())
         return b
+
+    def chip_icon(self, label, icon, active, action):
+        w = TapBox(size_hint=(None, 1), width=dp(50) + dp(8.4) * len(label),
+                   padding=[dp(12), 0, dp(14), 0], spacing=dp(6))
+        paint(w, CHIP_ON if active else CARD_D, 18)
+        img = make_image(icon)
+        if img is not None:
+            img.size_hint = (None, None)
+            img.size = (dp(18), dp(18))
+            img.color = CYAN if active else TXT
+            holder = AnchorLayout(size_hint=(None, 1), width=dp(18))
+            holder.add_widget(img)
+            w.add_widget(holder)
+        w.add_widget(Label(text=label, font_size="13sp", bold=active, color=CYAN if active else TXT))
+        w.bind(on_release=lambda *a: action())
+        return w
+
+    def refresh_chips(self):
+        inner = self.chip_row[1]
+        inner.clear_widgets()
+        active = "cats" if self.cat else self.mode
+        for label, key, icon in (("Home", "home", "nav_home.png"), ("Games", "games", "nav_games.png"),
+                                 ("Apps", "apps", "nav_apps.png"), ("Top Charts", "top", "ic_chart.png"),
+                                 ("Categories", "cats", "ic_grid.png")):
+            inner.add_widget(self.chip_icon(label, icon, active == key, lambda k=key: self.chip_action(k)))
+
+    def chip_action(self, key):
+        if key == "cats":
+            self.category_popup()
+        else:
+            self.set_mode(key)
 
     def refresh_kinds(self):
         inner = self.kind_row[1]
@@ -840,34 +1219,67 @@ class StoreApp(App):
                             ("Mods", "mod"), ("Other stores", "external")):
             inner.add_widget(self.chip(label, self.kind == kind, lambda k=kind: self.set_kind(k)))
 
-    def refresh_cats(self):
-        inner = self.cat_row[1]
-        inner.clear_widgets()
+    def set_mode(self, mode, reload=False):
+        self.mode = mode
+        self.cat = ""
+        self.limit = 60
+        self.refresh_chips()
+        if self.tab_is_store():
+            self.update_nav(mode if mode in ("home", "games") else "apps")
+        if reload:
+            self.load()
+        else:
+            self.render()
+
+    def tab_is_store(self):
+        return getattr(self, "tab", "home") in ("home", "games", "apps", "top")
+
+    def category_popup(self):
         cats = sorted({a["category"] for a in self.data if a.get("category")})
-        inner.add_widget(self.chip("All categories", self.cat == "", lambda: self.set_cat("")))
-        for c in cats:
-            inner.add_widget(self.chip(c, self.cat == c, lambda x=c: self.set_cat(x)))
+        box = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(8))
+        sv = ScrollView()
+        lst = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8))
+        lst.bind(minimum_height=lst.setter("height"))
+        pop = Dialog(title="Categories", content=box, size_hint=(0.9, 0.7))
+
+        def pick(c):
+            pop.dismiss()
+            self.limit = 60
+            self.cat = c
+            self.refresh_chips()
+            self.render()
+        for c in [""] + cats:
+            b = pill(c or "All categories", CHIP_ON if c == self.cat else LINE_D, TXT, h=42, size="14sp",
+                     bold=(c == self.cat))
+            b.bind(on_release=lambda *a, cc=c: pick(cc))
+            lst.add_widget(b)
+        sv.add_widget(lst)
+        box.add_widget(sv)
+        pop.open()
 
     def on_search_text(self, inst, value):
+        self.limit = 60
         if self._ev:
             self._ev.cancel()
         self._ev = Clock.schedule_once(lambda dt: self.load(), 0.5)
 
     def set_kind(self, kind):
+        self.limit = 60
         self.kind = kind
-        self.cat = ""
         self.refresh_kinds()
         self.load()
 
-    def set_cat(self, cat):
-        self.cat = cat
-        self.refresh_cats()
-        self.render()
-
     def toggle_sort(self):
+        self.limit = 60
         self.sort = "new" if self.sort == "popular" else "popular"
         self.sort_btn.text = "Sort: Popular" if self.sort == "popular" else "Sort: Newest"
         self.render()
+
+    def set_results_chrome(self, on):
+        for w, h in ((self.kind_row[0], 42), (self.srow, 34)):
+            w.height = dp(h) if on else 0
+            w.opacity = 1 if on else 0
+            w.disabled = not on
 
     def say(self, msg):
         try:
@@ -887,35 +1299,201 @@ class StoreApp(App):
             return
         if err:
             self.say("Can't reach server: " + err)
+            self.set_results_chrome(True)
             return
         self.data = data
-        if self.cat and self.cat not in {a.get("category") for a in data}:
-            self.cat = ""
-        self.refresh_cats()
         self.render()
 
-    def render(self):
-        self.box.clear_widgets()
-        rows = [a for a in self.data
-                if (not self.cat or a.get("category") == self.cat)
-                and (P["show_mods"] or a["kind"] != "mod")
+    def visible_rows(self):
+        return [a for a in self.data
+                if (P["show_mods"] or a["kind"] != "mod")
                 and (P["show_external"] or a["kind"] != "external")]
-        if self.sort == "popular":
+
+    def render(self):
+        self.items = {a["id"]: a for a in self.data}
+        self.box.clear_widgets()
+        rows = self.visible_rows()
+        results = bool(self.search.text.strip()) or self.mode != "home" or bool(self.cat)
+        self.set_results_chrome(results)
+        if not results:
+            self.render_home(rows)
+            return
+        if self.mode == "games":
+            rows = [a for a in rows if is_game(a)]
+        elif self.mode == "apps":
+            rows = [a for a in rows if not is_game(a)]
+        if self.cat:
+            rows = [a for a in rows if a.get("category") == self.cat]
+        if self.mode == "top" or self.sort == "popular":
             rows.sort(key=lambda a: a.get("downloads", 0), reverse=True)
         else:
             rows.sort(key=lambda a: a.get("id", 0), reverse=True)
-        self.items = {a["id"]: a for a in self.data}
         if not rows:
-            self.box.add_widget(text("No apps found", size="16sp", color=GRAY,
+            self.box.add_widget(text("No apps found", size="16sp", color=SUB,
                                      height=dp(120), halign="center"))
-        for a in rows:
+        for a in rows[:self.limit]:
             self.box.add_widget(self.card(a))
+        if len(rows) > self.limit:
+            more = gpill("Show more  (%d left)" % (len(rows) - self.limit), BLUE_A, BLUE_B, h=46, size="14sp")
+            more.bind(on_release=lambda *a: self.show_more())
+            self.box.add_widget(more)
         self.say("%d apps" % len(rows))
 
-    def card(self, a):
+    def show_more(self):
+        self.limit += 60
+        self.render()
+
+    def render_home(self, rows):
+        self.box.add_widget(self.banner())
+        if not rows:
+            self.box.add_widget(text("No apps yet. Pull the store together from the admin page.",
+                                     size="14sp", color=SUB, height=dp(90), halign="center"))
+            return
+        by_dl = lambda items: sorted(items, key=lambda a: a.get("downloads", 0), reverse=True)[:12]
+        sections = (
+            ("Popular Apps", by_dl([a for a in rows if not is_game(a)]), ORANGE, "apps"),
+            ("Top Games", by_dl([a for a in rows if is_game(a)]), VIOLET, "games"),
+            ("Modded Versions", [a for a in rows if a["kind"] == "mod"][:12], RED, "mods"),
+            ("New Arrivals", sorted(rows, key=lambda a: a.get("id", 0), reverse=True)[:12], CYAN, "new"),
+        )
+        for title, items, accent, which in sections:
+            if items:
+                self.box.add_widget(self.section(title, items, accent, which))
+
+    def banner(self):
+        ban = FloatLayout(size_hint_y=None, height=dp(176))
+        paint(ban, BANNER_BG, 22)
+        bg = make_image("banner.png", fill=True)
+        if bg:
+            ban.add_widget(bg)
+        col = BoxLayout(orientation="vertical", size_hint=(0.58, 1), pos_hint={"x": 0, "y": 0},
+                        padding=[dp(16), dp(14), dp(4), dp(14)], spacing=dp(4))
+        tag_row = AnchorLayout(anchor_x="left", size_hint_y=None, height=dp(22))
+        tag = Label(text="[b]FEATURED[/b]", markup=True, font_size="10sp", color=TXT,
+                    size_hint=(None, None), size=(dp(82), dp(20)))
+        paint(tag, TAG_BG, 10)
+        tag_row.add_widget(tag)
+        col.add_widget(tag_row)
+        col.add_widget(text("[b]Best Apps\nFor You[/b]", size="22sp", color=TXT, height=dp(62)))
+        col.add_widget(auto_text("Top rated apps, games and tools to make your life easier.",
+                                 size="11sp", color=SUB))
+        col.add_widget(Widget())
+        go = gpill("Explore Now  >", CYAN_A, CYAN_B, h=36, size="13sp")
+        go.size_hint_x = None
+        go.width = dp(132)
+        go.bind(on_release=lambda *a: self.set_mode("apps"))
+        col.add_widget(go)
+        ban.add_widget(col)
+        return ban
+
+    def section(self, title, items, accent, which):
+        box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8))
+        box.bind(minimum_height=box.setter("height"))
+        head = BoxLayout(size_hint_y=None, height=dp(30), padding=[dp(4), 0], spacing=dp(8))
+        ic = make_image({"apps": "nav_apps.png", "games": "nav_games.png", "mods": "nav_downloads.png",
+                         "new": "nav_home.png"}.get(which, "nav_apps.png"))
+        if ic is not None:
+            ic.size_hint = (None, None)
+            ic.size = (dp(24), dp(24))
+            ic.color = accent
+            bh = AnchorLayout(size_hint=(None, 1), width=dp(28))
+            bh.add_widget(ic)
+        else:
+            bar = Widget(size_hint=(None, None), size=(dp(5), dp(20)))
+            paint(bar, accent, 3)
+            bh = AnchorLayout(size_hint=(None, 1), width=dp(6))
+            bh.add_widget(bar)
+        head.add_widget(bh)
+        head.add_widget(text("[b]%s[/b]" % esc(title), size="17sp", color=TXT))
+        more = Button(text="See All  >", size_hint_x=None, width=dp(92), background_normal="",
+                      background_down="", background_color=(0, 0, 0, 0), color=CYAN, font_size="13sp")
+        more.bind(on_release=lambda *a: self.see_all(which))
+        head.add_widget(more)
+        box.add_widget(head)
+        scroll = ScrollView(size_hint_y=None, height=dp(188), do_scroll_y=False, bar_width=0)
+        inner = BoxLayout(size_hint_x=None, spacing=dp(10), padding=[dp(2), 0, dp(2), 0])
+        inner.bind(minimum_width=inner.setter("width"))
+        for a in items:
+            inner.add_widget(self.tile(a))
+        scroll.add_widget(inner)
+        box.add_widget(scroll)
+        return box
+
+    def see_all(self, which):
+        if which == "mods":
+            self.kind = "mod"
+            self.refresh_kinds()
+            self.set_mode("apps", reload=True)
+        elif which == "new":
+            self.sort = "new"
+            self.sort_btn.text = "Sort: Newest"
+            self.set_mode("apps")
+        else:
+            self.set_mode(which)
+
+    def icon_url(self, a):
+        u = (a.get("icon") or "").strip()
+        if u.startswith("/"):
+            u = SERVER + u
+        return u if u.lower().startswith("https://") else ""
+
+    def app_icon(self, a, size):
+        """Brand-coloured tile first; the real picture replaces it when it has loaded."""
+        bg, fg = brand(a["name"])
+        holder = AnchorLayout(size_hint=(None, None), size=(dp(size), dp(size)))
+        holder.add_widget(avatar(a["name"], size, bg=bg, fg=fg))
+        url = self.icon_url(a)
+        if url:
+            path = cached_icon(url)
+            if path:
+                self.show_icon(holder, path, size)
+            else:
+                run_bg(lambda: fetch_icon(url),
+                       lambda p, e, h=holder: self.show_icon(h, p, size) if p else None)
+        return holder
+
+    def show_icon(self, holder, path, size):
+        try:
+            icon = RoundedIcon(path, corner=size * 0.22, size_hint=(None, None), size=(dp(size), dp(size)))
+            holder.clear_widgets()
+            holder.add_widget(icon)
+        except Exception:
+            pass                      # keep the coloured tile
+
+    def tile(self, a):
+        """One app in a sideways row."""
         name = a["name"]
         color = ICON_COLORS[sum(ord(c) for c in name) % len(ICON_COLORS)]
-        if is_store_link(a):
+        store = is_store_link(a)
+        if store:
+            meta = "Google Play"
+        elif a["kind"] == "mod":
+            meta = "[color=ff6655]MOD[/color]  -  %s dl" % a["downloads"]
+        else:
+            meta = "%s downloads" % a["downloads"]
+        w = BoxLayout(orientation="vertical", size_hint=(None, None), size=(dp(122), dp(184)),
+                      padding=dp(8), spacing=dp(6))
+        paint(w, CARD_D, 18)
+        top = TapBox(orientation="vertical", spacing=dp(2))
+        art = AnchorLayout(size_hint_y=None, height=dp(66))
+        art.add_widget(self.app_icon(a, 62))
+        top.add_widget(art)
+        top.add_widget(text("[b]%s[/b]" % esc(name), size="13sp", color=TXT, height=dp(20), shorten=True))
+        top.add_widget(text(esc(a["category"]), size="11sp", color=SUB, height=dp(16), shorten=True))
+        top.add_widget(text(meta, size="11sp", color=SUB, height=dp(16), shorten=True))
+        top.bind(on_release=lambda *x, i=a["id"]: self.details(i))
+        w.add_widget(top)
+        btn = gpill("Open" if store else "Install", BLUE_A, BLUE_B, h=30, size="12sp")
+        btn.bind(on_release=lambda *x, i=a["id"]: self.get_app(i))
+        w.add_widget(btn)
+        return w
+
+    def card(self, a):
+        """One app in a vertical results list."""
+        name = a["name"]
+        color = ICON_COLORS[sum(ord(c) for c in name) % len(ICON_COLORS)]
+        store = is_store_link(a)
+        if store:
             badge = "[color=4285f4]Opens in Google Play[/color]"
         else:
             if a.get("verified"):
@@ -927,48 +1505,82 @@ class StoreApp(App):
             elif a["kind"] == "external":
                 badge += "   [color=4285f4]via %s[/color]" % esc(a["source"])
 
-        card = BoxLayout(size_hint_y=None, height=dp(124), padding=dp(12), spacing=dp(12))
-        paint(card, WHITE, 18)
-        card.add_widget(avatar(name, 62, bg=color, fg=WHITE))
+        card = BoxLayout(size_hint_y=None, height=dp(108), padding=dp(12), spacing=dp(12))
+        paint(card, CARD_D, 18)
+        card.add_widget(self.app_icon(a, 60))
 
-        info = BoxLayout(orientation="vertical", spacing=dp(2))
-        info.add_widget(text("[b]%s[/b]" % esc(name), size="16sp", height=dp(24), shorten=True))
+        info = TapBox(orientation="vertical", spacing=dp(2))
+        info.add_widget(text("[b]%s[/b]" % esc(name), size="16sp", color=TXT, height=dp(24), shorten=True))
         info.add_widget(text("%s  -  %s" % (esc(a["developer"]), esc(a["category"])),
-                             size="12sp", color=GRAY, height=dp(18), shorten=True))
-        info.add_widget(text("%s downloads  -  v%s" % (a["downloads"], esc(a["version"])),
-                             size="12sp", color=GRAY, height=dp(18), shorten=True))
-        info.add_widget(text(badge, size="12sp"))
+                             size="12sp", color=SUB, height=dp(18), shorten=True))
+        meta = "Google Play" if store else "%s downloads  -  v%s" % (a["downloads"], esc(a["version"]))
+        info.add_widget(text(meta, size="12sp", color=SUB, height=dp(18), shorten=True))
+        info.add_widget(text(badge, size="12sp", color=TXT))
+        info.bind(on_release=lambda *x, i=a["id"]: self.details(i))
         card.add_widget(info)
 
         side = AnchorLayout(size_hint_x=None, width=dp(88))
-        col = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(78), spacing=dp(6))
-        inst = pill("Open" if is_store_link(a) else "Install", ACCENT, WHITE)
+        inst = gpill("Open" if store else "Install", BLUE_A, BLUE_B, h=36, size="13sp")
         inst.bind(on_release=lambda *x, i=a["id"]: self.get_app(i))
-        det = pill("Details", CHIP_BG, DARK, h=34, size="12sp", bold=False)
-        det.bind(on_release=lambda *x, i=a["id"]: self.details(i))
-        col.add_widget(inst)
-        col.add_widget(det)
-        side.add_widget(col)
+        side.add_widget(inst)
         card.add_widget(side)
         return card
 
+    # ============================================================ downloads tab
+    def build_downloads(self):
+        sv = ScrollView(bar_width=dp(3))
+        col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
+                        padding=[dp(14), dp(18), dp(14), dp(24)])
+        col.bind(minimum_height=col.setter("height"))
+        col.add_widget(text("[b]Downloads[/b]", size="24sp", color=TXT, height=dp(40)))
+        files = [p for p in P["downloads"] if os.path.exists(p)]
+        if not files:
+            col.add_widget(text("Nothing downloaded yet.\nApps you install from My Store show up here.",
+                                size="14sp", color=SUB, height=dp(110), halign="center"))
+        for p in reversed(files):
+            row = BoxLayout(size_hint_y=None, height=dp(66), padding=dp(10), spacing=dp(8))
+            paint(row, CARD_D, 16)
+            row.add_widget(text(esc(os.path.basename(p)), size="13sp", color=TXT, shorten=True))
+            ih = AnchorLayout(size_hint_x=None, width=dp(84))
+            inst = gpill("Install", BLUE_A, BLUE_B, h=34, size="12sp")
+            inst.bind(on_release=lambda *a, pp=p: self.try_install(pp))
+            ih.add_widget(inst)
+            row.add_widget(ih)
+            dh = AnchorLayout(size_hint_x=None, width=dp(74))
+            rm = pill("Delete", LINE_D, TXT, h=34, size="12sp", bold=False)
+            rm.bind(on_release=lambda *a, pp=p: self.delete_download(pp))
+            dh.add_widget(rm)
+            row.add_widget(dh)
+            col.add_widget(row)
+        sv.add_widget(col)
+        return sv
+
+    def delete_download(self, path):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        P["downloads"] = [p for p in P["downloads"] if p != path]
+        save_prefs()
+        self.switch_tab("downloads")
+
     # ============================================================ popups
     def popup(self, title, msg, yes=None, yes_label="Continue", extra=None):
-        box = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(8))
-        sv = ScrollView()
-        sv.add_widget(auto_text(msg, size="14sp", color=WHITE))
+        box = BoxLayout(orientation="vertical", spacing=dp(10))
+        sv = ScrollView(bar_width=dp(3))
+        sv.add_widget(auto_text(msg, size="14sp", color=TXT))
         box.add_widget(sv)
         row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        pop = Popup(title=title, content=box, size_hint=(0.92, 0.62))
-        close = Button(text="Cancel" if yes else "Close")
+        pop = Dialog(title=title, content=box, size_hint=(0.92, 0.6))
+        close = pill("Cancel" if yes else "Close", LINE_D, TXT, h=44, size="14sp", bold=False)
         close.bind(on_release=lambda *a: pop.dismiss())
         row.add_widget(close)
         if extra:
-            b = Button(text=extra[0])
+            b = pill(extra[0], LINE_D, CYAN, h=44, size="14sp", bold=False)
             b.bind(on_release=lambda *a: (pop.dismiss(), extra[1]()))
             row.add_widget(b)
         if yes:
-            ok = Button(text=yes_label, background_normal="", background_color=ACCENT)
+            ok = gpill(yes_label, BLUE_A, BLUE_B, h=44, size="14sp")
             ok.bind(on_release=lambda *a: (pop.dismiss(), yes()))
             row.add_widget(ok)
         box.add_widget(row)
@@ -976,9 +1588,9 @@ class StoreApp(App):
 
     def form_popup(self, title, intro, fields, submit_label, on_submit):
         """fields: [(hint, is_password, default)]. on_submit(values, msg_label, popup)."""
-        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+        box = BoxLayout(orientation="vertical", spacing=dp(8))
         if intro:
-            box.add_widget(auto_text(intro, size="13sp", color=WHITE))
+            box.add_widget(auto_text(intro, size="13sp", color=SUB))
         inputs = []
         for hint, pw, default in fields:
             b, ti = field(hint, pw, default)
@@ -987,11 +1599,11 @@ class StoreApp(App):
         msg = text("", size="12sp", color=(1, 0.55, 0.55, 1), height=dp(32))
         box.add_widget(msg)
         row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        pop = Popup(title=title, content=box, size_hint=(0.94, None),
-                    height=dp(210 + 62 * len(fields) + (50 if intro else 0)))
-        cancel = Button(text="Cancel")
+        pop = Dialog(title=title, content=box, size_hint=(0.94, None),
+                     height=dp(230 + 62 * len(fields) + (50 if intro else 0)))
+        cancel = pill("Cancel", LINE_D, TXT, h=44, size="14sp", bold=False)
         cancel.bind(on_release=lambda *a: pop.dismiss())
-        go = Button(text=submit_label, background_normal="", background_color=ACCENT)
+        go = gpill(submit_label, BLUE_A, BLUE_B, h=44, size="14sp")
         go.bind(on_release=lambda *a: on_submit([i.text for i in inputs], msg, pop))
         row.add_widget(cancel)
         row.add_widget(go)
@@ -1000,6 +1612,42 @@ class StoreApp(App):
 
     def text_popup(self, title, body):
         self.popup(title, esc(body))
+
+    def policy_page(self, title, body):
+        root = BoxLayout(orientation="vertical", spacing=dp(6))
+        paint(root, NAVY, 0)
+        head = BoxLayout(size_hint_y=None, height=dp(66), padding=[dp(14), dp(12), dp(14), dp(6)], spacing=dp(12))
+        back = pill("<  Back", LINE_D, TXT, h=42, size="14sp", bold=False)
+        back.size_hint_x = None
+        back.width = dp(96)
+        back.bind(on_release=lambda *a: self.back_to_settings())
+        bh = AnchorLayout(size_hint=(None, 1), width=dp(96))
+        bh.add_widget(back)
+        head.add_widget(bh)
+        head.add_widget(text("[b]%s[/b]" % esc(title), size="20sp", color=TXT))
+        root.add_widget(head)
+
+        sv = ScrollView(bar_width=dp(3))
+        col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(12),
+                        padding=[dp(14), dp(4), dp(14), dp(28)])
+        col.bind(minimum_height=col.setter("height"))
+        card = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(18), spacing=dp(12))
+        card.bind(minimum_height=card.setter("height"))
+        paint(card, CARD_D, 22)
+        line = Widget(size_hint_y=None, height=dp(4))
+        paint_grad(line, CYAN_A, VIOLET, 2)
+        card.add_widget(line)
+        for sentence in [s.strip() for s in body.replace("\n", " ").split(". ") if s.strip()]:
+            if not sentence.endswith("."):
+                sentence += "."
+            lbl = auto_text("[color=22d3ee][b]-[/b][/color]  " + esc(sentence), size="15sp", color=TXT)
+            lbl.line_height = 1.25
+            card.add_widget(lbl)
+        card.add_widget(text("Terms version %s" % TERMS_VERSION, size="12sp", color=SUB, height=dp(22)))
+        col.add_widget(card)
+        sv.add_widget(col)
+        root.add_widget(sv)
+        self.show(root)
 
     # ============================================================ details / install
     def details(self, app_id):
@@ -1052,20 +1700,7 @@ class StoreApp(App):
         tok = self.token()
         run_bg(lambda: call("/api/track/%s" % a["id"], {"event": "download"}, tok),
                lambda r, e: None)
-        try:
-            from jnius import autoclass
-            Intent = autoclass("android.content.Intent")
-            Uri = autoclass("android.net.Uri")
-            Activity = autoclass("org.kivy.android.PythonActivity")
-            i = Intent(Intent.ACTION_VIEW, Uri.parse(a["url"]))
-            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            Activity.mActivity.startActivity(i)
-        except Exception:
-            try:
-                import webbrowser
-                webbrowser.open(a["url"])
-            except Exception:
-                self.say("Open this link in your browser: " + a["url"])
+        self.open_url(a["url"])
 
     def downloaded(self, a, path, digest, err):
         if err:
@@ -1081,7 +1716,9 @@ class StoreApp(App):
             run_bg(lambda: call("/api/track/%s" % a["id"], {"event": "download"}, tok),
                    lambda r, e: None)
         P["downloads"] = (P["downloads"] + [path])[-50:]
+        P.setdefault("tracked", {})[str(a["id"])] = {"name": a["name"], "version": a["version"]}
         save_prefs()
+        self.sync_service()
         self.say("Saved: " + path)
         self.try_install(path)
         if P["ask_verify"]:
@@ -1089,20 +1726,87 @@ class StoreApp(App):
                        "If yes, you can help verify this app (one vote per account).",
                        yes=lambda: self.vote(a["id"]), yes_label="Yes, verify")
 
+    def can_install(self):
+        """True when Android lets My Store install apps (or the phone is old enough not to ask)."""
+        try:
+            from jnius import autoclass
+            Activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            if autoclass("android.os.Build$VERSION").SDK_INT < 26:
+                return True
+            return bool(Activity.getPackageManager().canRequestPackageInstalls())
+        except Exception:
+            return True
+
+    def open_install_settings(self):
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            Settings = autoclass("android.provider.Settings")
+            Activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                          Uri.parse("package:" + Activity.getPackageName())))
+        except Exception:
+            self.say("Open Android Settings > Apps > My Store and allow installing apps")
+
     def try_install(self, path):
         try:
             from jnius import autoclass
-            autoclass("android.os.StrictMode").disableDeathOnFileUriExposure()
-            Intent = autoclass("android.content.Intent")
-            Uri = autoclass("android.net.Uri")
-            File = autoclass("java.io.File")
-            Activity = autoclass("org.kivy.android.PythonActivity")
-            i = Intent(Intent.ACTION_VIEW)
-            i.setDataAndType(Uri.fromFile(File(path)), "application/vnd.android.package-archive")
-            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            Activity.mActivity.startActivity(i)
         except Exception:
             self.say("Saved. Open it from your file manager to install: " + path)
+            return
+        try:
+            if not self.can_install():
+                self._pending_install = path
+                self.popup("Allow installs",
+                           "Android needs your permission before My Store can install apps.\n\n"
+                           "Tap Open settings, switch on [b]Allow from this source[/b], then come back. "
+                           "The install continues by itself.",
+                           yes=self.open_install_settings, yes_label="Open settings")
+                return
+            self.launch_installer(path)
+        except Exception:
+            self.say("Saved. Open it from your file manager to install: " + path)
+
+    def copy_to_downloads(self, path):
+        """Android 10+: put a copy in the shared Downloads folder so the installer may read it."""
+        from jnius import autoclass
+        ContentValues = autoclass("android.content.ContentValues")
+        Downloads = autoclass("android.provider.MediaStore$Downloads")
+        Activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        values = ContentValues()
+        values.put("_display_name", os.path.basename(path))
+        values.put("mime_type", "application/vnd.android.package-archive")
+        values.put("relative_path", "Download/My Store")
+        resolver = Activity.getContentResolver()
+        uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, values)
+        out = resolver.openOutputStream(uri)
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 16)
+                    if not chunk:
+                        break
+                    out.write(bytearray(chunk))
+        finally:
+            out.close()
+        return uri
+
+    def launch_installer(self, path):
+        from jnius import autoclass
+        Intent = autoclass("android.content.Intent")
+        Uri = autoclass("android.net.Uri")
+        File = autoclass("java.io.File")
+        Activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        if autoclass("android.os.Build$VERSION").SDK_INT >= 29:
+            uri = self.copy_to_downloads(path)
+        else:
+            autoclass("android.os.StrictMode").disableDeathOnFileUriExposure()
+            uri = Uri.fromFile(File(path))
+        i = Intent(Intent.ACTION_VIEW)
+        i.setDataAndType(uri, "application/vnd.android.package-archive")
+        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        Activity.startActivity(i)
 
     def vote(self, app_id):
         if self.is_guest():
@@ -1125,18 +1829,18 @@ class StoreApp(App):
 
     # ============================================================ settings tab
     def group(self, col, title):
-        col.add_widget(text("[b]%s[/b]" % title, size="12sp", color=GRAY, height=dp(22)))
+        col.add_widget(text("[b]%s[/b]" % title, size="12sp", color=SUB, height=dp(22)))
         g = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(6), spacing=dp(2))
         g.bind(minimum_height=g.setter("height"))
-        paint(g, WHITE, 18)
+        paint(g, CARD_D, 18)
         col.add_widget(g)
         return g
 
     def row(self, g, title, sub, action=None, danger=False):
-        c = "e53935" if danger else "1f2230"
+        c = "ff6b6b" if danger else "eef2ff"
         label = "[b][color=%s]%s[/color][/b]" % (c, esc(title))
         if sub:
-            label += "\n[size=12sp][color=7a7f8c]%s[/color][/size]" % esc(sub)
+            label += "\n[size=12sp][color=93a0cc]%s[/color][/size]" % esc(sub)
         b = Button(text=label, markup=True, size_hint_y=None, height=dp(58 if sub else 48),
                    background_normal="", background_down="", background_color=(0, 0, 0, 0),
                    halign="left", valign="middle", font_size="14sp", padding_x=dp(12))
@@ -1147,19 +1851,21 @@ class StoreApp(App):
 
     def toggle_row(self, g, title, sub, key):
         r = BoxLayout(size_hint_y=None, height=dp(58), padding=[dp(12), 0, dp(6), 0], spacing=dp(8))
-        r.add_widget(text("[b]%s[/b]\n[size=12sp][color=7a7f8c]%s[/color][/size]" % (esc(title), esc(sub)),
-                          size="14sp"))
+        r.add_widget(text("[b]%s[/b]\n[size=12sp][color=93a0cc]%s[/color][/size]" % (esc(title), esc(sub)),
+                          size="14sp", color=TXT))
         on = P[key]
-        btn = pill("ON" if on else "OFF", CHIP_BG, ACCENT if on else GRAY, h=32, size="12sp")
+        btn = pill("ON" if on else "OFF", LINE_D, CYAN if on else SUB, h=32, size="12sp")
         holder = AnchorLayout(size_hint_x=None, width=dp(70))
 
         def flip(*a):
             P[key] = not P[key]
             save_prefs()
             btn.text = "ON" if P[key] else "OFF"
-            btn.color = ACCENT if P[key] else GRAY
+            btn.color = CYAN if P[key] else SUB
             if key in ("show_mods", "show_external") and self.items is not None:
                 self.render()
+            if key == "notify_updates":
+                self.sync_service()
         btn.bind(on_release=flip)
         holder.add_widget(btn)
         r.add_widget(holder)
@@ -1175,7 +1881,7 @@ class StoreApp(App):
 
         # profile card
         prof = BoxLayout(size_hint_y=None, height=dp(100), padding=dp(16), spacing=dp(14))
-        paint(prof, HEADER, 22)
+        paint_grad(prof, (0.10, 0.36, 0.86, 1), (0.52, 0.26, 0.92, 1), 22)
         prof.add_widget(avatar(acct["name"], 62))
         who = BoxLayout(orientation="vertical", spacing=dp(2))
         who.add_widget(text("[b]%s[/b]" % esc(acct["name"]), size="18sp", color=WHITE,
@@ -1191,7 +1897,8 @@ class StoreApp(App):
                      lambda: self.show_auth("signin", can_cancel=True))
         else:
             self.row(g, "Edit display name", acct["name"], self.edit_name)
-            self.row(g, "Change password", "Signs out your other devices", self.change_password)
+            if acct.get("provider") != "google":
+                self.row(g, "Change password", "Signs out your other devices", self.change_password)
             self.row(g, "Switch account", "%d on this phone" % len(P["accounts"]), self.switch_popup)
             self.row(g, "Add another account", "Sign in or create a new account",
                      lambda: self.show_auth("signin", can_cancel=True))
@@ -1204,6 +1911,12 @@ class StoreApp(App):
         self.toggle_row(g, "Show modded apps", "Unofficial versions", "show_mods")
         self.toggle_row(g, "Show other stores' apps", "Apps linked from other sources", "show_external")
         self.row(g, "Default sort", "Popular" if P["sort"] == "popular" else "Newest", self.cycle_sort)
+
+        g = self.group(col, "NOTIFICATIONS")
+        self.toggle_row(g, "App alerts", "Tell me about new apps and updates to apps I installed",
+                        "notify_updates")
+        self.row(g, "Send a test notification", "Check that alerts reach you",
+                 lambda: self.notify("My Store", "Notifications are working."))
 
         g = self.group(col, "DOWNLOADS")
         self.row(g, "Download folder", save_dir(), lambda: self.text_popup("Download folder", save_dir()))
@@ -1220,7 +1933,7 @@ class StoreApp(App):
 
         g = self.group(col, "ABOUT & LEGAL")
         for key, title, body in POLICIES:
-            self.row(g, title, "", lambda t=title, b=body: self.text_popup(t, b))
+            self.row(g, title, "", lambda t=title, b=body: self.policy_page(t, b))
         self.row(g, "My Store", "Version %s" % APP_VERSION, self.version_tap)
 
         if not guest:
@@ -1278,8 +1991,8 @@ class StoreApp(App):
                          ("Confirm new password", True, "")], "Change", submit)
 
     def switch_popup(self):
-        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
-        pop = Popup(title="Switch account", content=box, size_hint=(0.92, 0.6))
+        box = BoxLayout(orientation="vertical", spacing=dp(8))
+        pop = Dialog(title="Switch account", content=box, size_hint=(0.92, 0.6))
         sv = ScrollView()
         lst = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8))
         lst.bind(minimum_height=lst.setter("height"))
@@ -1292,7 +2005,7 @@ class StoreApp(App):
             lst.add_widget(b)
         sv.add_widget(lst)
         box.add_widget(sv)
-        add = Button(text="Add another account", size_hint_y=None, height=dp(46))
+        add = gpill("Add another account", BLUE_A, BLUE_B, h=46, size="14sp")
         add.bind(on_release=lambda *a: (pop.dismiss(), self.show_auth("signin", can_cancel=True)))
         box.add_widget(add)
         pop.open()
@@ -1324,9 +2037,11 @@ class StoreApp(App):
             self.show_auth("signin", message=message)
 
     def delete_account(self):
+        google = (self.active() or {}).get("provider") == "google"
+
         def submit(vals, msg, pop):
             if not vals[0]:
-                msg.text = "Enter your password"
+                msg.text = "Type DELETE to confirm" if google else "Enter your password"
                 return
             tok = self.token()
             msg.text = "Deleting..."
@@ -1337,11 +2052,12 @@ class StoreApp(App):
                     return
                 pop.dismiss()
                 self.drop_active("Account deleted")
-            run_bg(lambda: call("/api/me/delete", {"password": vals[0]}, tok), done)
+            payload = {"confirm": vals[0]} if google else {"password": vals[0]}
+            run_bg(lambda: call("/api/me/delete", payload, tok), done)
         self.form_popup("Delete account",
                         "This permanently deletes your account and your verification votes. "
-                        "Enter your password to confirm.",
-                        [("Password", True, "")], "Delete", submit)
+                        + ("Type DELETE to confirm." if google else "Enter your password to confirm."),
+                        [("Type DELETE" if google else "Password", not google, "")], "Delete", submit)
 
     def cycle_sort(self):
         P["sort"] = "new" if P["sort"] == "popular" else "popular"

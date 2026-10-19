@@ -41,6 +41,20 @@ except Exception:
     SSL_CTX = ssl.create_default_context()
     CERT_SOURCE = "built-in (certifi missing)"
 
+try:
+    from store_notify import is_newer, read_inbox, clear_inbox, KINDS
+except Exception:                                   # keeps the app starting even if the file is missing
+    KINDS = {"new": "New app", "update": "App update", "self": "My Store update", "test": "Test"}
+
+    def read_inbox():
+        return []
+
+    def clear_inbox():
+        pass
+
+    def is_newer(new, old):
+        return False
+
 SERVER = "https://sam202411.pythonanywhere.com"
 APP_VERSION = "1.0"
 TERMS_VERSION = "2026-10"
@@ -290,6 +304,23 @@ GAME_WORDS = ("game", "action", "adventure", "racing", "puzzle", "arcade", "stra
               "simulation", "shooter")
 
 
+def ago(ts):
+    s = max(0, int(time.time() - ts))
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return "%d min ago" % (s // 60)
+    if s < 86400:
+        return "%d h ago" % (s // 3600)
+    return "%d days ago" % (s // 86400)
+
+
+def vscroll(**kw):
+    """Vertical scroller that follows the finger easily and leaves sideways swipes to the rows."""
+    return ScrollView(bar_width=dp(3), scroll_type=["bars", "content"], scroll_distance=dp(10),
+                      scroll_timeout=120, do_scroll_x=False, **kw)
+
+
 class Dialog(ModalView):
     """Rounded dark card with a coloured title line. Used instead of the plain Kivy Popup."""
 
@@ -531,6 +562,8 @@ class StoreApp(App):
     def build(self):
         self.title = "My Store"
         self.device = device_id()
+        P["app_version"] = APP_VERSION          # the background service compares against this
+        save_prefs()
         self.data, self.items = [], {}
         self.kind, self.cat, self._ev = "", "", None
         self.root_box = BoxLayout(orientation="vertical")
@@ -841,22 +874,33 @@ class StoreApp(App):
         self.after_auth(res, None, "google", res["user"]["email"])
 
     def on_new_intent(self, intent):
+        url, target = "", ""
         try:
             data = intent.getData()
             url = data.toString() if data else ""
         except Exception:
-            return
-        Clock.schedule_once(lambda dt: self.handle_link(url), 0)
+            pass
+        try:
+            target = intent.getStringExtra("open") or ""
+        except Exception:
+            pass
+        if url:
+            Clock.schedule_once(lambda dt: self.handle_link(url), 0)
+        if target == "inbox":
+            Clock.schedule_once(lambda dt: self.open_inbox(), 0.3)
 
     def on_start(self):
         try:
             from android import activity
             activity.bind(on_new_intent=self.on_new_intent)
             from jnius import autoclass
-            data = autoclass("org.kivy.android.PythonActivity").mActivity.getIntent().getData()
+            intent = autoclass("org.kivy.android.PythonActivity").mActivity.getIntent()
+            data = intent.getData()
             if data:
                 url = data.toString()
                 Clock.schedule_once(lambda dt: self.handle_link(url), 1.5)
+            if (intent.getStringExtra("open") or "") == "inbox":      # opened by tapping a notification
+                Clock.schedule_once(lambda dt: self.open_inbox(), SPLASH_SECONDS + 1.5)
         except Exception:
             pass                      # not on a phone
 
@@ -888,7 +932,7 @@ class StoreApp(App):
         try:
             from jnius import autoclass
             from store_notify import post_notification
-            post_notification(autoclass("org.kivy.android.PythonActivity").mActivity, title, message)
+            post_notification(autoclass("org.kivy.android.PythonActivity").mActivity, title, message, kind="test")
         except Exception:
             self.notice(message)
 
@@ -967,7 +1011,7 @@ class StoreApp(App):
                               size="13sp", color=GRAY))
         root.add_widget(intro)
 
-        sv = ScrollView(bar_width=dp(3))
+        sv = vscroll()
         col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
                         padding=[dp(14), dp(4), dp(14), dp(8)])
         col.bind(minimum_height=col.setter("height"))
@@ -1048,6 +1092,7 @@ class StoreApp(App):
         self.load()
         Clock.schedule_once(lambda dt: self.ask_permissions(), 1.5)
         Clock.schedule_once(lambda dt: self.sync_service(), 3)
+        Clock.schedule_once(lambda dt: self.check_self_update(), 4)
 
     def switch_tab(self, key):
         key = {"store": "home", "settings": "profile"}.get(key, key)
@@ -1084,12 +1129,20 @@ class StoreApp(App):
                          padding=[dp(14), dp(12), dp(14), dp(2)], spacing=dp(10))
         top = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(10))
         logo = make_image(HOME_LOGO)
+        logo_tap = TapBox(size_hint=(1, 1))
         if logo:
-            logo.size_hint = (None, None)
-            logo.size = (dp(56), dp(56))
-            top.add_widget(logo)
+            logo_tap.add_widget(logo)
         else:
-            top.add_widget(avatar("M", 56, bg=ACCENT, fg=WHITE))
+            logo_tap.add_widget(avatar("M", 56, bg=ACCENT, fg=WHITE))
+        logo_tap.bind(on_release=lambda *a: self.open_inbox())
+        logo_box = FloatLayout(size_hint=(None, None), size=(dp(58), dp(58)))
+        logo_box.add_widget(logo_tap)
+        self.badge = Label(text="", font_size="10sp", bold=True, color=WHITE, size_hint=(None, None),
+                           size=(dp(20), dp(20)), pos_hint={"right": 1, "top": 1}, opacity=0)
+        paint(self.badge, RED, 10)
+        logo_box.add_widget(self.badge)
+        top.add_widget(logo_box)
+        self.update_badge()
         tcol = BoxLayout(orientation="vertical", spacing=dp(2))
         title = make_image("title_tight.png")
         if title:
@@ -1157,7 +1210,7 @@ class StoreApp(App):
         self.srow.add_widget(self.sort_btn)
         view.add_widget(self.srow)
 
-        scroll = ScrollView(bar_width=dp(3))
+        scroll = vscroll()
         self.box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(14),
                              padding=[dp(12), dp(4), dp(12), dp(16)])
         self.box.bind(minimum_height=self.box.setter("height"))
@@ -1303,6 +1356,13 @@ class StoreApp(App):
             return
         self.data = data
         self.render()
+        pend = getattr(self, "_pending_details", None)
+        if pend is not None:
+            self._pending_details = None
+            if pend in self.items:
+                self.details(pend)
+            else:
+                self.notice("That app is no longer in the store")
 
     def visible_rows(self):
         return [a for a in self.data
@@ -1349,12 +1409,12 @@ class StoreApp(App):
             self.box.add_widget(text("No apps yet. Pull the store together from the admin page.",
                                      size="14sp", color=SUB, height=dp(90), halign="center"))
             return
-        by_dl = lambda items: sorted(items, key=lambda a: a.get("downloads", 0), reverse=True)[:12]
+        by_dl = lambda items: sorted(items, key=lambda a: a.get("downloads", 0), reverse=True)[:20]
         sections = (
             ("Popular Apps", by_dl([a for a in rows if not is_game(a)]), ORANGE, "apps"),
             ("Top Games", by_dl([a for a in rows if is_game(a)]), VIOLET, "games"),
-            ("Modded Versions", [a for a in rows if a["kind"] == "mod"][:12], RED, "mods"),
-            ("New Arrivals", sorted(rows, key=lambda a: a.get("id", 0), reverse=True)[:12], CYAN, "new"),
+            ("Modded Versions", [a for a in rows if a["kind"] == "mod"][:20], RED, "mods"),
+            ("New Arrivals", sorted(rows, key=lambda a: a.get("id", 0), reverse=True)[:20], CYAN, "new"),
         )
         for title, items, accent, which in sections:
             if items:
@@ -1410,7 +1470,8 @@ class StoreApp(App):
         more.bind(on_release=lambda *a: self.see_all(which))
         head.add_widget(more)
         box.add_widget(head)
-        scroll = ScrollView(size_hint_y=None, height=dp(188), do_scroll_y=False, bar_width=0)
+        scroll = ScrollView(size_hint_y=None, height=dp(188), do_scroll_y=False, bar_width=0,
+                       scroll_distance=dp(8), scroll_timeout=100)
         inner = BoxLayout(size_hint_x=None, spacing=dp(10), padding=[dp(2), 0, dp(2), 0])
         inner.bind(minimum_width=inner.setter("width"))
         for a in items:
@@ -1526,9 +1587,118 @@ class StoreApp(App):
         card.add_widget(side)
         return card
 
+    # ============================================================ notifications inbox + My Store update
+    def unread_count(self):
+        seen = P.get("inbox_seen", 0)
+        return len([i for i in read_inbox() if i.get("t", 0) > seen])
+
+    def update_badge(self):
+        try:
+            n = self.unread_count()
+            self.badge.text = str(n) if n < 10 else "9+"
+            self.badge.opacity = 1 if n else 0
+        except Exception:
+            pass
+
+    def open_inbox(self):
+        items = read_inbox()
+        P["inbox_seen"] = time.time()
+        save_prefs()
+        root = BoxLayout(orientation="vertical", spacing=dp(6))
+        paint(root, NAVY, 0)
+        head = BoxLayout(size_hint_y=None, height=dp(66), padding=[dp(14), dp(12), dp(14), dp(6)], spacing=dp(10))
+        back = pill("<  Back", LINE_D, TXT, h=42, size="14sp", bold=False)
+        back.size_hint_x = None
+        back.width = dp(92)
+        back.bind(on_release=lambda *a: self.show_main())
+        bh = AnchorLayout(size_hint=(None, 1), width=dp(92))
+        bh.add_widget(back)
+        head.add_widget(bh)
+        head.add_widget(text("[b]Notifications[/b]", size="20sp", color=TXT))
+        if items:
+            clr = pill("Clear", LINE_D, TXT, h=38, size="13sp", bold=False)
+            clr.size_hint_x = None
+            clr.width = dp(72)
+            clr.bind(on_release=lambda *a: (clear_inbox(), self.open_inbox()))
+            ch = AnchorLayout(size_hint=(None, 1), width=dp(72))
+            ch.add_widget(clr)
+            head.add_widget(ch)
+        root.add_widget(head)
+        sv = vscroll()
+        col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
+                        padding=[dp(14), dp(4), dp(14), dp(28)])
+        col.bind(minimum_height=col.setter("height"))
+        if not items:
+            col.add_widget(text("No notifications yet.\nNew apps and updates show up here.",
+                                size="14sp", color=SUB, height=dp(120), halign="center"))
+        for it in items:
+            col.add_widget(self.inbox_row(it))
+        sv.add_widget(col)
+        root.add_widget(sv)
+        self.show(root)
+
+    def inbox_row(self, it):
+        kind = it.get("kind", "")
+        color = {"new": CYAN, "update": ORANGE, "self": VIOLET}.get(kind, SUB)
+        card = TapBox(orientation="vertical", size_hint_y=None, padding=dp(14), spacing=dp(4))
+        card.bind(minimum_height=card.setter("height"))
+        paint(card, CARD_D, 18)
+        top = BoxLayout(size_hint_y=None, height=dp(20))
+        top.add_widget(text("[b]%s[/b]" % esc(KINDS.get(kind, kind or "Notice").upper()), size="11sp", color=color))
+        top.add_widget(text(ago(it.get("t", 0)), size="11sp", color=SUB, halign="right"))
+        card.add_widget(top)
+        card.add_widget(text("[b]%s[/b]" % esc(it.get("title", "")), size="15sp", color=TXT, height=dp(24)))
+        card.add_widget(auto_text(esc(it.get("message", "")), size="13sp", color=SUB))
+        card.bind(on_release=lambda *a, x=it: self.inbox_tap(x))
+        return card
+
+    def inbox_tap(self, it):
+        if it.get("kind") == "self":
+            self.show_main()
+            self.switch_tab("profile")
+        elif it.get("app_id") is not None:
+            self._pending_details = it["app_id"]      # open the app once the list has loaded
+            self.show_main()
+
+    def check_self_update(self):
+        run_bg(lambda: call("/api/self"), self.got_self)
+
+    def got_self(self, info, err):
+        if err or not info or not info.get("version") or not info.get("url"):
+            return
+        if is_newer(info["version"], APP_VERSION):
+            self.self_info = info
+            if P.get("self_toast") != info["version"]:
+                P["self_toast"] = info["version"]
+                save_prefs()
+                self.notice("My Store %s is ready - see Profile" % info["version"])
+        else:
+            self.self_info = None
+
+    def update_self(self):
+        info = getattr(self, "self_info", None)
+        if not info:
+            return
+        path = os.path.join(save_dir(), "MyStore_%s.apk" % "".join(c if c.isalnum() or c == "." else "_" for c in info["version"]))
+        self.notice("Downloading My Store %s ..." % info["version"])
+        run_bg(lambda: fetch_file(info["url"], path, None),
+               lambda digest, err: self.self_downloaded(info, path, digest, err))
+
+    def self_downloaded(self, info, path, digest, err):
+        if err:
+            self.notice("Download failed: " + err)
+            return
+        if info.get("sha256") and digest.lower() != info["sha256"].lower():
+            os.remove(path)
+            self.popup("Blocked", "The update does not match its checksum and was deleted.")
+            return
+        P["downloads"] = (P["downloads"] + [path])[-50:]
+        save_prefs()
+        self.try_install(path)
+
     # ============================================================ downloads tab
     def build_downloads(self):
-        sv = ScrollView(bar_width=dp(3))
+        sv = vscroll()
         col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
                         padding=[dp(14), dp(18), dp(14), dp(24)])
         col.bind(minimum_height=col.setter("height"))
@@ -1567,7 +1737,7 @@ class StoreApp(App):
     # ============================================================ popups
     def popup(self, title, msg, yes=None, yes_label="Continue", extra=None):
         box = BoxLayout(orientation="vertical", spacing=dp(10))
-        sv = ScrollView(bar_width=dp(3))
+        sv = vscroll()
         sv.add_widget(auto_text(msg, size="14sp", color=TXT))
         box.add_widget(sv)
         row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
@@ -1627,7 +1797,7 @@ class StoreApp(App):
         head.add_widget(text("[b]%s[/b]" % esc(title), size="20sp", color=TXT))
         root.add_widget(head)
 
-        sv = ScrollView(bar_width=dp(3))
+        sv = vscroll()
         col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(12),
                         padding=[dp(14), dp(4), dp(14), dp(28)])
         col.bind(minimum_height=col.setter("height"))
@@ -1874,7 +2044,7 @@ class StoreApp(App):
     def build_settings(self):
         acct = self.active() or {"name": "Guest", "email": "Browsing as guest"}
         guest = self.active() is None
-        sv = ScrollView(bar_width=dp(3))
+        sv = vscroll()
         col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
                         padding=[dp(12), dp(12), dp(12), dp(24)])
         col.bind(minimum_height=col.setter("height"))
@@ -1912,6 +2082,12 @@ class StoreApp(App):
         self.toggle_row(g, "Show other stores' apps", "Apps linked from other sources", "show_external")
         self.row(g, "Default sort", "Popular" if P["sort"] == "popular" else "Newest", self.cycle_sort)
 
+        info = getattr(self, "self_info", None)
+        if info:
+            g = self.group(col, "MY STORE UPDATE")
+            self.row(g, "Update My Store to %s" % info["version"],
+                     info.get("notes") or "Tap to download and install the new version", self.update_self)
+
         g = self.group(col, "NOTIFICATIONS")
         self.toggle_row(g, "App alerts", "Tell me about new apps and updates to apps I installed",
                         "notify_updates")
@@ -1934,7 +2110,7 @@ class StoreApp(App):
         g = self.group(col, "ABOUT & LEGAL")
         for key, title, body in POLICIES:
             self.row(g, title, "", lambda t=title, b=body: self.policy_page(t, b))
-        self.row(g, "My Store", "Version %s" % APP_VERSION, self.version_tap)
+        self.row(g, "My Store", "Version %s%s" % (APP_VERSION, "  -  update available" if getattr(self, "self_info", None) else ""), self.version_tap)
 
         if not guest:
             g = self.group(col, "DANGER ZONE")
@@ -2100,7 +2276,7 @@ class StoreApp(App):
 
     def publish_form(self):
         acct = self.active() or {"email": ""}
-        sv = ScrollView(bar_width=dp(3))
+        sv = vscroll()
         col = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
                         padding=[dp(16), dp(20), dp(16), dp(28)])
         col.bind(minimum_height=col.setter("height"))
@@ -2175,40 +2351,4 @@ class StoreApp(App):
                     err.color = RED
                     err.text = esc(e)
                     return
-                self.notice("Request sent. We will review it.")
-                self.back_to_settings()
-            run_bg(lambda: call("/api/submit", payload, tok), done)
-        send.bind(on_release=submit)
-        col.add_widget(send)
-
-        back = pill("Cancel", CHIP_BG, DARK, h=44, bold=False)
-        back.bind(on_release=lambda *a: self.back_to_settings())
-        col.add_widget(back)
-
-        sv.add_widget(col)
-        self.show(sv)
-
-    def my_requests(self):
-        tok = self.token()
-
-        def done(rows, e):
-            if e:
-                self.popup("My requests", esc(e))
-                return
-            if not rows:
-                self.popup("My requests", "You have not sent any requests yet.")
-                return
-            labels = {"pending": "Waiting for review", "approved": "Approved and published",
-                      "rejected": "Not approved"}
-            lines = []
-            for r in rows:
-                line = "[b]%s[/b]  v%s\n%s" % (esc(r["name"]), esc(r["version"]),
-                                              labels.get(r["status"], esc(r["status"])))
-                if r.get("note"):
-                    line += "\n" + esc(r["note"])
-                lines.append(line)
-            self.popup("My requests", "\n\n".join(lines))
-        run_bg(lambda: call("/api/submissions/mine", token=tok), done)
-
-
-StoreApp().run()
+     

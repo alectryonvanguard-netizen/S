@@ -2351,4 +2351,40 @@ class StoreApp(App):
                     err.color = RED
                     err.text = esc(e)
                     return
-     
+                self.notice("Request sent. We will review it.")
+                self.back_to_settings()
+            run_bg(lambda: call("/api/submit", payload, tok), done)
+        send.bind(on_release=submit)
+        col.add_widget(send)
+
+        back = pill("Cancel", CHIP_BG, DARK, h=44, bold=False)
+        back.bind(on_release=lambda *a: self.back_to_settings())
+        col.add_widget(back)
+
+        sv.add_widget(col)
+        self.show(sv)
+
+    def my_requests(self):
+        tok = self.token()
+
+        def done(rows, e):
+            if e:
+                self.popup("My requests", esc(e))
+                return
+            if not rows:
+                self.popup("My requests", "You have not sent any requests yet.")
+                return
+            labels = {"pending": "Waiting for review", "approved": "Approved and published",
+                      "rejected": "Not approved"}
+            lines = []
+            for r in rows:
+                line = "[b]%s[/b]  v%s\n%s" % (esc(r["name"]), esc(r["version"]),
+                                              labels.get(r["status"], esc(r["status"])))
+                if r.get("note"):
+                    line += "\n" + esc(r["note"])
+                lines.append(line)
+            self.popup("My requests", "\n\n".join(lines))
+        run_bg(lambda: call("/api/submissions/mine", token=tok), done)
+
+
+StoreApp().run()
